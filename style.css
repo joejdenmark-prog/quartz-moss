@@ -1,0 +1,73 @@
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0d1a09;
+  font-family: system-ui, sans-serif;
+}
+
+#canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+#reset-btn {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 1px solid rgba(140, 200, 80, 0.32);
+  background: rgba(12, 34, 8, 0.72);
+  color: rgba(148, 208, 88, 0.90);
+  font-size: 22px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  display: none;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  transition: opacity 0.25s ease, transform 0.14s ease;
+  opacity: 0.60;
+  z-index: 100;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+#reset-btn:hover  { opacity: 1; }
+#reset-btn:active { transform: scale(0.90); opacity: 1; }
+
+#audio-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 12, 3, 0.72);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  transition: opacity 0.8s ease;
+}
+
+#audio-gate span {
+  color: rgba(120, 180, 80, 0.75);
+  font-size: 15px;
+  letter-spacing: 0.18em;
+  text-transform: lowercase;
+  font-family: system-ui, sans-serif;
+}
