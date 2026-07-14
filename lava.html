@@ -409,7 +409,7 @@ scene.add(boulderMesh);
 const activeCracks = [];   // { id, group }
 const HEAT_DECAY = 0.16;
 
-function buildCrackGroup(seed, normal, worldPoint, boulderRadius){
+function buildCrackGroup(seed, normal, worldPoint, boulderRadius, id){
   const crng = mulberry32(seed >>> 0);
   const crand = (a,b) => a + crng()*(b-a);
   const group = new THREE.Group();
@@ -454,8 +454,9 @@ function buildCrackGroup(seed, normal, worldPoint, boulderRadius){
     mesh.renderOrder = 5;
     group.add(mesh);
   }
-  group.position.copy(worldPoint);
-  group.position.y += 0.15;
+  group.position.x = worldPoint.x;
+  group.position.z = worldPoint.z;
+  group.position.y = boulderDefs[id].y + boulderDefs[id].radius + 0.05;
   group.rotation.x = -Math.PI / 2;
   return group;
 }
@@ -472,9 +473,9 @@ function triggerCrack(id, hitPoint){
   const center = new THREE.Vector3(def.x, def.y, def.z);
   const normal = hitPoint.clone().sub(center).normalize();
   if (normal.lengthSq() < 1e-6) normal.set(0,1,0);
-  const group = buildCrackGroup(id*1013 + activeCracks.length*97 + 7, normal, hitPoint, def.radius);
+  const group = buildCrackGroup(id*1013 + activeCracks.length*97 + 7, normal, hitPoint, def.radius, id);
   scene.add(group);
-  dbg(`crack added at x=${group.position.x.toFixed(2)} y=${group.position.y.toFixed(2)} z=${group.position.z.toFixed(2)} children=${group.children.length}`);
+  dbg(`crack at x=${group.position.x.toFixed(2)} y=${group.position.y.toFixed(2)} z=${group.position.z.toFixed(2)} boulderY=${boulderDefs[id].y.toFixed(2)} r=${boulderDefs[id].radius.toFixed(2)}`);
   activeCracks.push({ id, group, startTime: performance.now() });
   if (activeCracks.length > 36) {
     const old = activeCracks.shift();
