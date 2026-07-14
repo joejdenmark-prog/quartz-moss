@@ -784,6 +784,7 @@ function pickRiver(e){
 let boulderDownId = null, boulderDownTime = 0, boulderDownX = 0, boulderDownY = 0;
 let holdTimer = null;
 const HOLD_MS = 220;
+let lastBoulderHitPoint = new THREE.Vector3();
 
 canvas.addEventListener('pointerdown', (e) => {
   const hit = pickBoulder(e);
@@ -791,12 +792,7 @@ canvas.addEventListener('pointerdown', (e) => {
     boulderDownId = hit.instanceId;
     boulderDownTime = performance.now();
     boulderDownX = e.clientX; boulderDownY = e.clientY;
-    clearTimeout(holdTimer);
-    const capturedId = hit.instanceId;
-    const capturedPoint = hit.point.clone();
-    holdTimer = setTimeout(() => {
-      if (boulderDownId === capturedId) triggerCrack(capturedId, capturedPoint);
-    }, HOLD_MS);
+    lastBoulderHitPoint.copy(hit.point);
     return;
   }
   const riverHit = pickRiver(e);
@@ -840,6 +836,7 @@ function releasePointer(e){
   clearTimeout(holdTimer);
   if (boulderDownId !== null && performance.now() - boulderDownTime < HOLD_MS) {
     handleBoulderTap(boulderDownId);
+    triggerCrack(boulderDownId, lastBoulderHitPoint);
   }
   boulderDownId = null;
   const slot = dragSlots.find(s => s.pointerId === e.pointerId);
