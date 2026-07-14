@@ -841,10 +841,15 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 function releasePointer(e){
+  const elapsed = performance.now() - boulderDownTime;
+  dbg(`release: boulderDownId=${boulderDownId} elapsed=${elapsed.toFixed(0)}ms`);
   clearTimeout(holdTimer);
-  if (boulderDownId !== null && performance.now() - boulderDownTime < HOLD_MS) {
+  if (boulderDownId !== null && elapsed < HOLD_MS) {
+    dbg(`TAP confirmed — calling handleBoulderTap and triggerCrack`);
     handleBoulderTap(boulderDownId);
     triggerCrack(boulderDownId, lastBoulderHitPoint);
+  } else {
+    dbg(`tap rejected — elapsed too long or boulderDownId null`);
   }
   boulderDownId = null;
   const slot = dragSlots.find(s => s.pointerId === e.pointerId);
