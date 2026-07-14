@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0a0402">
+<title>Lava River</title>
+<style>
+  *,*::before,*::after{ margin:0; padding:0; box-sizing:border-box; }
+  html,body{
+    width:100%; height:100%; overflow:hidden;
+    background:#0a0402;
+    font-family:system-ui,-apple-system,sans-serif;
+    -webkit-tap-highlight-color:transparent;
+  }
+  #canvas{
+    display:block; width:100%; height:100%;
+    touch-action:none; -webkit-tap-highlight-color:transparent; user-select:none;
+  }
+  #vignette{
+    position:fixed; inset:0; pointer-events:none; z-index:5;
+    background:radial-gradient(ellipse 100% 90% at 50% 45%,
+      transparent 45%, rgba(0,0,0,0.35) 78%, rgba(0,0,0,0.72) 100%);
+  }
+  #fps{
+    position:fixed; top:8px; left:8px; z-index:9999;
+    font:12px/1.4 monospace; color:#ff8a4a;
+    background:rgba(10,4,2,0.55); padding:4px 8px; border-radius:4px;
+    pointer-events:none; white-space:pre;
+  }
+  #reset-btn{
+    position:fixed; bottom:24px; right:24px; width:46px; height:46px;
+    border-radius:50%;
+    border:1px solid rgba(255,110,60,0.35);
+    background:rgba(20,6,4,0.72);
+    color:rgba(255,140,90,0.9);
+    font-size:22px; line-height:1;
+    display:flex; align-items:center; justify-content:center;
+    cursor:pointer;
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    transition:opacity .25s ease, transform .14s ease;
+    opacity:.6; z-index:100; user-select:none;
+    -webkit-tap-highlight-color:transparent; touch-action:manipulation;
+  }
+  #reset-btn:hover  { opacity:1; }
+  #reset-btn:active { transform:scale(.9); opacity:1; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="vignette"></div>
+<div id="fps">-- fps</div>
+<button id="reset-btn" title="Reset">↺</button>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── Seeded RNG ───────────────────────────────────────────────────────────────
+function mulberry32(seed){
+  return function(){
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rng   = mulberry32(0x1a7a51);
+const range = (a,b) => a + rng() * (b - a);
+function smoothstepJS(a,b,x){ const t = Math.min(1, Math.max(0, (x-a)/(b-a))); return t*t*(3-2*t); }
+
+// ── Renderer / scene / camera (orthographic, straight top-down) ─────────────
+let W = window.innerWidth, H = window.innerHeight;
+const canvas = document.getElementById('canvas');
+const isMobile = window.matchMedia('(pointer: coarse)').matches;
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(isMobile ? Math.min(window.devicePixelRatio, 1.5) : Math.min(window.devicePixelRatio, 2));
+renderer.setSize(W, H);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = false;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x080302);
+
+const ORTHO_H = 9;
+const camera = new THREE.OrthographicCamera(
+  -(W / H) * ORTHO_H, (W / H) * ORTHO_H,
+  ORTHO_H, -ORTHO_H,
+  0.1, 100
+);
+camera.up.set(0, 0, -1);
+camera.position.set(0, 20, 0);
+camera.lookAt(0, 0, 0);
+
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    W = window.innerWidth; H = window.innerHeight;
+    camera.left   = -(W / H) * ORTHO_H;
+    camera.right  =  (W / H) * ORTHO_H;
+    camera.top    =  ORTHO_H;
+    camera.bottom = -ORTHO_H;
+    camera.updateProjectionMatrix();
+    renderer.setSize(W, H);
+  }, 250);
+});
+
+// ── Lights ────────────────────────────────────────────────────────────────────
+scene.add(new THREE.HemisphereLight(0x3a1c14, 0x0d0806, 0.78));
+const sun = new THREE.DirectionalLight(0xffb27a, 0.95);
+sun.position.set(-6, 14, 4);
+scene.add(sun);
+const fillLight = new THREE.DirectionalLight(0xff6a3a, 0.20);
+fillLight.position.set(5, 8, -6);
+scene.add(fillLight);
+
+// ── River path shape (centerline + width, in world units) ───────────────────
+const HW = camera.right;                      // half visible width at startup
+const baseHalfWidth = HW * 0.50;
+const widthVar      = HW * 0.035;
+const ampA = HW * 0.22, ampB = HW * 0.09;
+function centerX(z){ return Math.sin(z*0.34+1.3)*ampA + Math.sin(z*0.15+0.6)*ampB; }
+function halfWidth(z){ return baseHalfWidth + Math.sin(z*0.19+2.1)*widthVar; }
+
+const RIVER_LENGTH = ORTHO_H * 2.6;
+const Z0 = -RIVER_LENGTH / 2;
+const EDGE_BLEED = 0.75; // extra lava width hidden under the innermost boulder ring
+
+// ── Lava river mesh + shader ──────────────────────────────────────────────────
+function buildRiverGeometry(edgeBleed){
+  const LEN_SEG = 90, WID_SEG = 14;
+  const positions = [], uvs = [], indices = [];
+  for (let i = 0; i <= LEN_SEG; i++) {
+    const t = i / LEN_SEG;
+    const z = Z0 + t * RIVER_LENGTH;
+    const cx = centerX(z);
+    const hw = halfWidth(z) + edgeBleed;
+    for (let j = 0; j <= WID_SEG; j++) {
+      const s = j / WID_SEG;
+      positions.push(cx + (s - 0.5) * 2 * hw, 0, z);
+      uvs.push(s, t);
+    }
+  }
+  const rowLen = WID_SEG + 1;
+  for (let i = 0; i < LEN_SEG; i++) {
+    for (let j = 0; j < WID_SEG; j++) {
+      const a = i*rowLen+j, b = a+1, c = a+rowLen, d = c+1;
+      indices.push(a,c,b, b,c,d);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  return geo;
+}
+
+const MAX_TOUCH = 4;
+const lavaMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    varying vec3 vWorldPos;
+    void main(){
+      vUv = uv;
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWorldPos = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    precision mediump float;
+    varying vec2 vUv;
+    varying vec3 vWorldPos;
+    uniform float uTime;
+
+    float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453123); }
+    float noise(vec2 p){
+      vec2 i = floor(p), f = fract(p);
+      float a = hash(i), b = hash(i+vec2(1.0,0.0));
+      float c = hash(i+vec2(0.0,1.0)), d = hash(i+vec2(1.0,1.0));
+      vec2 u = f*f*(3.0-2.0*f);
+      return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+    }
+    float fbm2(vec2 p){
+      float v = 0.0, a = 0.5;
+      for(int i=0;i<2;i++){ v += a*noise(p); p *= 2.02; a *= 0.5; }
+      return v;
+    }
+    float fbm(vec2 p){
+      float v = 0.0, a = 0.5;
+      for(int i=0;i<4;i++){ v += a*noise(p); p *= 2.02; a *= 0.5; }
+      return v;
+    }
+
+    void main(){
+      // domain-warped turbulence — reads as a viscous flowing surface
+      // rather than a smooth glowing mist.
+      vec2 flowUv = vUv*vec2(3.2,9.0) + vec2(uTime*0.02, -uTime*0.28);
+      vec2 warp = vec2(fbm2(flowUv*1.4 + 5.2), fbm2(flowUv*1.4 - 3.7)) - 0.5;
+      vec2 p1 = flowUv + warp*1.1;
+      float n1 = fbm(p1);
+      vec2 p2 = vUv*vec2(6.5,17.0) - vec2(uTime*0.018, uTime*0.24) + warp*0.7;
+      float n2 = fbm(p2);
+
+      // thin dark solidified-crust veins threaded through the flow
+      float crustN = fbm(vUv*vec2(9.5,23.0) + warp*1.6 + vec2(uTime*0.010, -uTime*0.045));
+      float crust = smoothstep(0.40,0.5,crustN) - smoothstep(0.5,0.60,crustN);
+
+      float veins = smoothstep(0.56, 0.80, n1*0.6 + n2*0.4);
+
+      vec3 darkBase   = vec3(0.336,0.0144,0.008);
+      vec3 midBase    = vec3(0.436,0.0224,0.0112);
+      vec3 brightVein = vec3(0.48,0.15,0.045);
+      vec3 crustColor = vec3(0.185,0.0088,0.0048);
+
+      vec3 col = mix(darkBase, midBase, n1);
+      col = mix(col, brightVein, veins*0.45);
+      col = mix(col, crustColor, clamp(crust,0.0,1.0)*0.75);
+      col.r = max(col.r, 0.185);
+
+      float c = abs(vUv.x-0.5)*2.0;
+
+      // sharpen the riverbank — crust down hard right at the true (un-bled) edge
+      float hw = ${baseHalfWidth.toFixed(6)} + sin(vWorldPos.z*0.19+2.1)*${widthVar.toFixed(6)};
+      float meshHw = hw + ${EDGE_BLEED.toFixed(6)};
+      float edgeFrac = hw/meshHw;
+      float bank = smoothstep(edgeFrac*0.62, edgeFrac*1.05, c);
+      col = mix(col, crustColor*0.6, bank*0.95);
+
+      // gently mute the very top edge so a stray bright vein cluster there
+      // never reads as a glitchy hotspot right at the screen boundary.
+      float topFade = smoothstep(${(-ORTHO_H).toFixed(3)}, ${(-ORTHO_H/3).toFixed(3)}, vWorldPos.z);
+      col *= mix(0.55, 1.0, topFade);
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+});
+
+const lavaGeo = buildRiverGeometry(EDGE_BLEED);
+const lavaMesh = new THREE.Mesh(lavaGeo, lavaMaterial);
+scene.add(lavaMesh);
+
+// A second, un-bled geometry defines the "true" river edge used to keep
+// boulders and bubbles clear of the flow — the bleed is purely a visual
+// strip that peeks through the gaps of the innermost boulder ring.
+function riverHalfWidthNominal(z){ return halfWidth(z); }
+
+// ── Ground plane (cooled rock bed beneath the boulder field) ─────────────────
+const groundGeo = new THREE.PlaneGeometry(HW*7.8, RIVER_LENGTH);
+groundGeo.rotateX(-Math.PI/2);
+const groundMat = new THREE.MeshStandardMaterial({ color: 0x4a1a0a, roughness: 1.0, metalness: 0.0, emissive: new THREE.Color(0x1a0000), emissiveIntensity: 0.8 });
+const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+groundMesh.position.y = -0.03;
+scene.add(groundMesh);
+
+// ── Boulders (dense instanced field along the river banks) ──────────────────
+const boulderGeo = new THREE.DodecahedronGeometry(1, 0);
+{
+  // Break the perfect polyhedral symmetry once, per-vertex, so every boulder
+  // (rotated/scaled per instance) reads as an irregular chunk of rock rather
+  // than a smooth, regular solid — flat faces stay flat, just uneven.
+  const jrng = mulberry32(0x9e3b7a);
+  const pos = boulderGeo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const jitter = 1 + (jrng() - 0.5) * 0.34;
+    pos.setXYZ(i, pos.getX(i)*jitter, pos.getY(i)*jitter, pos.getZ(i)*jitter);
+  }
+  pos.needsUpdate = true;
+  boulderGeo.computeVertexNormals();
+}
+const boulderMaterial = new THREE.MeshStandardMaterial({
+  color: 0xffffff, roughness: 0.98, metalness: 0.0, flatShading: true,
+});
+boulderMaterial.onBeforeCompile = (shader) => {
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', `#include <common>
+      attribute float aHeat;
+      attribute float aRiverGlow;
+      attribute float aRiverSide;
+      varying float vHeat;
+      varying float vRiverGlow;
+      varying float vRiverFacing;`)
+    .replace('#include <begin_vertex>', `#include <begin_vertex>
+      vHeat = aHeat;
+      vRiverGlow = aRiverGlow;
+      vec3 outwardDir = normalize(mat3(instanceMatrix) * normalize(position));
+      vRiverFacing = max(0.0, outwardDir.x * aRiverSide);`);
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', '#include <common>\nvarying float vHeat;\nvarying float vRiverGlow;\nvarying float vRiverFacing;')
+    .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+      float h = clamp(vHeat, 0.0, 1.0);
+      vec3 riverGlowColor = vec3(0.48,0.055,0.03);
+      totalEmissiveRadiance += riverGlowColor * vRiverGlow * vRiverFacing * 0.85;
+      // baseline visibility floor — without this, this dark an albedo gets
+      // crushed to pure black by the tone curve tuned for the bright lava.
+      totalEmissiveRadiance += vec3(0.046,0.037,0.030);`);
+};
+
+// Multi-tier scatter: large boulders first, then medium, then small — each
+// later pass fills the gaps the previous pass left, so the banks read as
+// dense packed rock rather than pebbles scattered on black ground.
+const boulderDefs = [];
+const BOUNDS_X = HW * 3.6;
+
+function inRiver(x, z, buffer){
+  return Math.abs(x - centerX(z)) < riverHalfWidthNominal(z) + buffer;
+}
+function tooClose(x, z, radius, factor){
+  for (const b of boulderDefs) {
+    const dx = x - b.x, dz = z - b.z;
+    const minDist = (radius + b.radius) * factor;
+    if (dx*dx + dz*dz < minDist*minDist) return true;
+  }
+  return false;
+}
+function scatterTier(cell, riverBuffer, radiusMin, radiusMax, packFactor){
+  for (let z = Z0; z <= Z0 + RIVER_LENGTH; z += cell) {
+    for (let x = -BOUNDS_X; x <= BOUNDS_X; x += cell) {
+      const jx = x + range(-cell*0.42, cell*0.42);
+      const jz = z + range(-cell*0.42, cell*0.42);
+      const radius = range(radiusMin, radiusMax);
+      // Scale the river exclusion by this boulder's own radius so large
+      // rocks can't visually intrude deep into the flow near the bank.
+      if (inRiver(jx, jz, riverBuffer + radius*0.55)) continue;
+      if (Math.abs(jx) > BOUNDS_X) continue;
+      if (tooClose(jx, jz, radius, packFactor)) continue;
+      boulderDefs.push({ x: jx, z: jz, radius });
+    }
+  }
+}
+
+scatterTier(1.30, 0.16, 0.50, 1.15, 0.62); // large, chunky anchor rocks
+scatterTier(0.62, 0.12, 0.30, 0.52, 0.68); // medium, fills the bigger gaps
+scatterTier(0.34, 0.08, 0.15, 0.28, 0.78); // small, packs remaining slivers
+
+const boulderMesh = new THREE.InstancedMesh(boulderGeo, boulderMaterial, boulderDefs.length);
+const heatArray = new Float32Array(boulderDefs.length);
+const riverGlowArray = new Float32Array(boulderDefs.length);
+const riverSideArray = new Float32Array(boulderDefs.length);
+{
+  const dummy = new THREE.Object3D();
+  const col = new THREE.Color();
+  const rockPalette = [
+    new THREE.Color(0x1a1a1a),
+    new THREE.Color(0x222222),
+    new THREE.Color(0x141414),
+  ];
+  boulderDefs.forEach((b, i) => {
+    const sy = b.radius * range(0.55, 0.8);
+    const sx = b.radius * range(0.9, 1.1);
+    const sz = b.radius * range(0.9, 1.1);
+    const y = sy * 0.32;
+    b.y = y;
+    dummy.position.set(b.x, y, b.z);
+    dummy.rotation.set(range(-0.3,0.3), range(0,Math.PI*2), range(-0.3,0.3));
+    dummy.scale.set(sx, sy, sz);
+    dummy.updateMatrix();
+    boulderMesh.setMatrixAt(i, dummy.matrix);
+    const pa = rockPalette[Math.floor(range(0, 3))];
+    const pb = rockPalette[Math.floor(range(0, 3))];
+    col.copy(pa).lerp(pb, range(0, 1));
+    boulderMesh.setColorAt(i, col);
+
+    // Ambient heat-radiating glow for boulders sitting right at the bank —
+    // faint and static, distinct from the interactive tap/hold warmth above.
+    const cx = centerX(b.z), hw = riverHalfWidthNominal(b.z);
+    const gapToEdge = Math.abs(b.x - cx) - hw - b.radius;
+    riverGlowArray[i] = Math.max(0, Math.min(1, 1 - gapToEdge / 0.75));
+    riverSideArray[i] = (cx - b.x) >= 0 ? 1 : -1;
+  });
+}
+boulderMesh.instanceColor.needsUpdate = true;
+boulderGeo.setAttribute('aHeat', new THREE.InstancedBufferAttribute(heatArray, 1));
+boulderGeo.setAttribute('aRiverGlow', new THREE.InstancedBufferAttribute(riverGlowArray, 1));
+boulderGeo.setAttribute('aRiverSide', new THREE.InstancedBufferAttribute(riverSideArray, 1));
+scene.add(boulderMesh);
+
+// ── Boulder crack system (hold-to-shatter, glowing veins) ────────────────────
+const activeCracks = [];   // { id, group }
+const HEAT_DECAY = 0.16;
+
+function buildCrackGroup(seed, normal, worldPoint, boulderRadius){
+  const crng = mulberry32(seed >>> 0);
+  const crand = (a,b) => a + crng()*(b-a);
+  const group = new THREE.Group();
+  const branches = 5 + Math.floor(crand(0,3));
+  for (let i = 0; i < branches; i++) {
+    const ang = (i/branches)*Math.PI*2 + crand(-0.3,0.3);
+    const len = boulderRadius * crand(1.2, 2.0);
+    const segs = 3 + Math.floor(crand(0,2));
+    const pts = [new THREE.Vector2(0,0)];
+    let cx = 0, cy = 0, a = ang;
+    for (let s = 0; s < segs; s++) {
+      a += crand(-0.5, 0.5);
+      const stepLen = len/segs;
+      cx += Math.cos(a)*stepLen;
+      cy += Math.sin(a)*stepLen;
+      pts.push(new THREE.Vector2(cx,cy));
+    }
+    const positions = [], idx = [];
+    for (let s = 0; s < pts.length-1; s++) {
+      const p0 = pts[s], p1 = pts[s+1];
+      const dir = new THREE.Vector2().subVectors(p1,p0).normalize();
+      const nrm = new THREE.Vector2(-dir.y, dir.x);
+      const w0 = 0.18*(1 - s/pts.length * 0.5);
+      const w1 = 0.18*(1 - (s+1)/pts.length * 0.5);
+      const base = s*4;
+      positions.push(
+        p0.x+nrm.x*w0, p0.y+nrm.y*w0, 0.001,
+        p0.x-nrm.x*w0, p0.y-nrm.y*w0, 0.001,
+        p1.x+nrm.x*w1, p1.y+nrm.y*w1, 0.001,
+        p1.x-nrm.x*w1, p1.y-nrm.y*w1, 0.001,
+      );
+      idx.push(base, base+2, base+1,  base+1, base+2, base+3);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setIndex(idx);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xff0000, transparent: true, opacity: 1.0,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.renderOrder = 5;
+    group.add(mesh);
+  }
+  group.position.copy(worldPoint);
+  group.position.y += 0.15;
+  group.rotation.x = -Math.PI / 2;
+  return group;
+}
+
+function disposeGroup(group){
+  group.traverse(o => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) o.material.dispose();
+  });
+}
+
+function triggerCrack(id, hitPoint){
+  const def = boulderDefs[id];
+  const center = new THREE.Vector3(def.x, def.y, def.z);
+  const normal = hitPoint.clone().sub(center).normalize();
+  if (normal.lengthSq() < 1e-6) normal.set(0,1,0);
+  const group = buildCrackGroup(id*1013 + activeCracks.length*97 + 7, normal, hitPoint, def.radius);
+  scene.add(group);
+  activeCracks.push({ id, group, startTime: performance.now() });
+  if (activeCracks.length > 36) {
+    const old = activeCracks.shift();
+    scene.remove(old.group);
+    disposeGroup(old.group);
+  }
+  heatArray[id] = 1.0;
+}
+
+function handleBoulderTap(id){
+  heatArray[id] = Math.min(0.5, heatArray[id] + 0.25);
+}
+
+function updateBoulderHeat(dt){
+  let changed = false;
+  for (let i = 0; i < heatArray.length; i++) {
+    if (heatArray[i] > 0) {
+      heatArray[i] = Math.max(0, heatArray[i] - dt*HEAT_DECAY);
+      changed = true;
+    }
+  }
+  if (changed) boulderGeo.attributes.aHeat.needsUpdate = true;
+  const now = performance.now();
+  for (let i = activeCracks.length - 1; i >= 0; i--) {
+    const c = activeCracks[i];
+    const elapsed = (now - c.startTime) / 1000;
+    const fillDur  = 0.8;
+    const holdDur  = 1.5;
+    const fadeDur  = 5.0;
+    let opacity = 0;
+    if (elapsed < fillDur) {
+      opacity = 0.3 + (elapsed / fillDur) * 0.7;
+    } else if (elapsed < fillDur + holdDur) {
+      opacity = 1.0;
+    } else if (elapsed < fillDur + holdDur + fadeDur) {
+      opacity = 1.0 - (elapsed - fillDur - holdDur) / fadeDur;
+    } else {
+      scene.remove(c.group);
+      disposeGroup(c.group);
+      activeCracks.splice(i, 1);
+      continue;
+    }
+    for (const m of c.group.children) m.material.opacity = opacity;
+  }
+}
+
+// ── Bubbles: grow, swell, pop with splash ─────────────────────────────────────
+// Unlit dome shader: darker crown, subtly brighter rim (object-space normal.y,
+// not view-dependent) — reads as a thick lava bulge rather than a flat disc,
+// and can never produce a lit specular hotspot.
+const bubbleGeo = new THREE.SphereGeometry(1, 12, 8);
+const bubbleShadowTex = makeRadialTexture('rgba(4,1,1,0.5)', 'rgba(4,1,1,0)');
+const MAX_BUBBLES = 5;
+const bubblePool = [];
+function makeBubbleMaterial(){
+  const t = range(0, 1);
+  const center = new THREE.Color(0x6b0f08).lerp(new THREE.Color(0x7d1509), t);
+  const rim    = new THREE.Color(0x8c1c0c).lerp(new THREE.Color(0xa02410), t);
+  return new THREE.ShaderMaterial({
+    uniforms: { uCenter: { value: center }, uRim: { value: rim } },
+    vertexShader: `
+      varying vec3 vN;
+      void main(){
+        vN = normalize(normal);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision mediump float;
+      varying vec3 vN;
+      uniform vec3 uCenter;
+      uniform vec3 uRim;
+      void main(){
+        float rim = pow(1.0 - clamp(vN.y, 0.0, 1.0), 1.6);
+        vec3 linearColor = mix(uCenter, uRim, rim);
+        // this material bypasses the standard material chunks, so the
+        // linear -> output colorspace conversion has to be done by hand or
+        // the bubbles render far too dark and blend into the lava.
+        gl_FragColor = vec4(pow(linearColor, vec3(0.4545)), 1.0);
+      }
+    `,
+  });
+}
+for (let i = 0; i < MAX_BUBBLES; i++) {
+  const mesh = new THREE.Mesh(bubbleGeo, makeBubbleMaterial());
+  mesh.visible = false;
+  scene.add(mesh);
+  const shadowMat = new THREE.SpriteMaterial({ map: bubbleShadowTex, transparent: true, opacity: 0, depthWrite: false });
+  const shadow = new THREE.Sprite(shadowMat);
+  shadow.visible = false;
+  scene.add(shadow);
+  bubblePool.push({ mesh, shadow, active: false, data: {} });
+}
+let activeBubbleCount = 0;
+
+function trySpawnBubble(){
+  if (activeBubbleCount >= MAX_BUBBLES) return;
+  const item = bubblePool.find(b => !b.active);
+  if (!item) return;
+  const z = range(-ORTHO_H*0.8, ORTHO_H*0.8);
+  const x = centerX(z) + range(-0.7, 0.7) * halfWidth(z);
+  const maxR = range(0.38, 0.62);
+  item.active = true; activeBubbleCount++;
+  item.data = { x, z, maxR, phase: 'grow', t: 0, growDur: range(2.0, 3.4), popT: 0 };
+  item.mesh.visible = true;
+  item.mesh.position.set(x, -maxR*0.85, z);
+  item.mesh.scale.setScalar(0.001);
+  item.shadow.visible = true;
+  item.shadow.position.set(x, 0.015, z);
+  item.shadow.material.opacity = 0;
+  item.shadow.scale.setScalar(0.001);
+}
+
+function updateBubbles(dt){
+  for (const item of bubblePool) {
+    if (!item.active) continue;
+    const d = item.data;
+    if (d.phase === 'grow') {
+      d.t += dt / d.growDur;
+      const s = Math.min(1, d.t);
+      const sm = smoothstepJS(0,1,s);
+      item.mesh.scale.setScalar(Math.max(0.001, sm * d.maxR));
+      item.mesh.position.y = -d.maxR*0.85 + sm*d.maxR*0.20;
+      item.shadow.scale.setScalar(Math.max(0.001, sm * d.maxR * 2.1));
+      item.shadow.material.opacity = sm * 0.5;
+      if (d.t >= 1) { d.phase = 'pop'; d.popT = 0; }
+    } else {
+      d.popT += dt;
+      const s = 1 + Math.min(1, d.popT/0.08) * 0.45;
+      item.mesh.scale.setScalar(d.maxR * s);
+      item.shadow.material.opacity = Math.max(0, 0.5 * (1 - d.popT/0.08));
+      if (d.popT >= 0.08) {
+        spawnSplash(d.x, d.z, 10 + Math.floor(Math.random()*5));
+        item.active = false; item.mesh.visible = false; item.shadow.visible = false; activeBubbleCount--;
+        setTimeout(trySpawnBubble, 200 + Math.random()*900);
+      }
+    }
+  }
+}
+
+// ── Shared sprite textures ────────────────────────────────────────────────────
+function makeRadialTexture(inner, outer, size=64){
+  const cnv = document.createElement('canvas'); cnv.width = cnv.height = size;
+  const ctx = cnv.getContext('2d');
+  const g = ctx.createRadialGradient(size/2,size/2,0, size/2,size/2,size/2);
+  g.addColorStop(0, inner);
+  g.addColorStop(1, outer);
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,size,size);
+  const tex = new THREE.CanvasTexture(cnv);
+  tex.needsUpdate = true;
+  return tex;
+}
+const splashTex = makeRadialTexture('rgba(120,45,25,0.7)', 'rgba(70,20,10,0)');
+const smokeTex  = makeRadialTexture('rgba(60,8,8,0.45)', 'rgba(25,4,4,0)');
+
+function makeSpritePool(count, texture, blending){
+  const pool = [];
+  for (let i = 0; i < count; i++) {
+    const mat = new THREE.SpriteMaterial({ map: texture, transparent: true, opacity: 0, depthWrite: false, blending });
+    const spr = new THREE.Sprite(mat);
+    spr.visible = false;
+    scene.add(spr);
+    pool.push({ sprite: spr, active: false, data: {} });
+  }
+  return pool;
+}
+const splashPool = makeSpritePool(40, splashTex, THREE.AdditiveBlending);
+const smokePool  = makeSpritePool(14, smokeTex, THREE.NormalBlending);
+
+// ── Splash particles (bubble pops) ───────────────────────────────────────────
+function spawnSplash(x, z, count){
+  let spawned = 0;
+  for (const item of splashPool) {
+    if (item.active) continue;
+    const ang = Math.random()*Math.PI*2;
+    const speed = 0.5 + Math.random()*1.1;
+    item.active = true;
+    item.data = { x, z, vx: Math.cos(ang)*speed, vz: Math.sin(ang)*speed, life: 0, maxLife: 0.3+Math.random()*0.25, size: 0.16+Math.random()*0.16 };
+    item.sprite.visible = true;
+    item.sprite.position.set(x, 1.5, z);
+    item.sprite.material.opacity = 0.22;
+    item.sprite.scale.setScalar(item.data.size);
+    spawned++;
+    if (spawned >= count) break;
+  }
+}
+function updateSplashes(dt){
+  for (const item of splashPool) {
+    if (!item.active) continue;
+    const d = item.data;
+    d.life += dt;
+    const tt = d.life / d.maxLife;
+    if (tt >= 1) { item.active = false; item.sprite.visible = false; continue; }
+    d.x += d.vx*dt; d.z += d.vz*dt;
+    item.sprite.position.set(d.x, 1.5, d.z);
+    item.sprite.material.opacity = (1 - tt) * 0.22;
+    item.sprite.scale.setScalar(d.size * (1 + tt*0.6));
+  }
+}
+
+// ── Smoke puffs drifting off the lava ────────────────────────────────────────
+let smokeTimer = 0.4;
+function updateSmokeSpawning(dt){
+  smokeTimer -= dt;
+  if (smokeTimer <= 0) {
+    smokeTimer = 0.6 + Math.random()*1.0;
+    spawnSmoke();
+  }
+}
+function spawnSmoke(){
+  const item = smokePool.find(p => !p.active);
+  if (!item) return;
+  const z = range(-ORTHO_H*0.85, ORTHO_H*0.85);
+  const x = centerX(z) + range(-0.7, 0.7) * halfWidth(z);
+  item.active = true;
+  item.data = {
+    x, z, driftX: range(-0.05,0.05), driftZ: range(-0.02,0.06),
+    life: 0, maxLife: range(3.5,5.5), startSize: range(0.35,0.55), endSize: range(1.0,1.5),
+  };
+  item.sprite.visible = true;
+  item.sprite.position.set(x, 1.2, z);
+  item.sprite.material.opacity = 0;
+  item.sprite.scale.set(item.data.startSize*0.55, item.data.startSize*1.3, 1);
+}
+function updateSmoke(dt){
+  for (const item of smokePool) {
+    if (!item.active) continue;
+    const d = item.data;
+    d.life += dt;
+    const tt = d.life / d.maxLife;
+    if (tt >= 1) { item.active = false; item.sprite.visible = false; continue; }
+    d.x += d.driftX*dt; d.z += d.driftZ*dt;
+    const scale = d.startSize + (d.endSize - d.startSize) * tt;
+    item.sprite.position.set(d.x, 1.2 + tt*1.5, d.z);
+    item.sprite.scale.set(scale*0.55, scale*1.3, 1);
+    let alpha;
+    if (tt < 0.15) alpha = tt/0.15 * 0.28;
+    else alpha = 0.28 * (1 - (tt-0.15)/0.85);
+    item.sprite.material.opacity = Math.max(0, alpha);
+  }
+}
+
+// ── Drag-on-lava parting effect ──────────────────────────────────────────────
+const dragSlots = Array.from({length: MAX_TOUCH}, () => ({ x: 9999, z: 9999, strength: 0, active: false, pointerId: null }));
+
+function updateDragSlots(dt){
+  for (const s of dragSlots) {
+    if (s.active) s.strength = Math.min(1, s.strength + dt*5.0);
+    else s.strength = Math.max(0, s.strength - dt*(1/3.2));
+  }
+}
+// Drag-parting visual: a glowing streak of small quads dropped along the
+// drag path, instead of a shader-driven effect.
+const dragQuadGeo = new THREE.PlaneGeometry(1.4, 1.4);
+dragQuadGeo.rotateX(-Math.PI/2); // face upward, flat on the lava surface
+
+const dragCanvas = document.createElement('canvas');
+dragCanvas.width = 64; dragCanvas.height = 64;
+const dragCtx = dragCanvas.getContext('2d');
+const dragGrad = dragCtx.createRadialGradient(32,32,0,32,32,32);
+dragGrad.addColorStop(0, 'rgba(130,20,4,0.9)');
+dragGrad.addColorStop(0.35, 'rgba(90,8,2,0.5)');
+dragGrad.addColorStop(0.7, 'rgba(50,2,0,0.2)');
+dragGrad.addColorStop(1, 'rgba(0,0,0,0)');
+dragCtx.fillStyle = dragGrad;
+dragCtx.fillRect(0,0,64,64);
+const dragTex = new THREE.CanvasTexture(dragCanvas);
+const dragMat = new THREE.MeshBasicMaterial({
+  map: dragTex, transparent: true, opacity: 1.0,
+  depthWrite: false, blending: THREE.AdditiveBlending
+});
+
+const DRAG_QUAD_COUNT = 80;
+const DRAG_QUAD_LIFE = 1.5;
+const DRAG_QUAD_OPACITY = 0.65;
+const dragQuadPool = [];
+for (let i = 0; i < DRAG_QUAD_COUNT; i++) {
+  const mesh = new THREE.Mesh(dragQuadGeo, dragMat.clone());
+  mesh.material.opacity = 0;
+  mesh.position.y = 0.05;
+  mesh.visible = false;
+  scene.add(mesh);
+  dragQuadPool.push({ mesh, life: 0 });
+}
+let nextDragQuad = 0;
+const dragLastSpawn = dragSlots.map(() => null);
+const DRAG_QUAD_SPACING = 0.05; // world units between quads along the path
+
+function spawnDragQuad(x, z){
+  const item = dragQuadPool[nextDragQuad];
+  nextDragQuad = (nextDragQuad + 1) % DRAG_QUAD_COUNT;
+  item.life = 0;
+  item.mesh.position.set(x, 0.05, z);
+  item.mesh.visible = true;
+  item.mesh.material.opacity = DRAG_QUAD_OPACITY;
+}
+
+function updateDragQuads(dt){
+  for (const item of dragQuadPool) {
+    if (!item.mesh.visible) continue;
+    item.life += dt;
+    if (item.life >= DRAG_QUAD_LIFE) { item.mesh.visible = false; continue; }
+    item.mesh.material.opacity = DRAG_QUAD_OPACITY * (1 - item.life / DRAG_QUAD_LIFE);
+  }
+}
+
+// ── Input: raycasting for boulder tap/hold and river drag ───────────────────
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+function ndcFromEvent(e){
+  const rect = canvas.getBoundingClientRect();
+  ndc.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
+  ndc.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
+  return ndc;
+}
+function pickBoulder(e){
+  raycaster.setFromCamera(ndcFromEvent(e), camera);
+  const hits = raycaster.intersectObject(boulderMesh);
+  return hits.length ? hits[0] : null;
+}
+function pickRiver(e){
+  raycaster.setFromCamera(ndcFromEvent(e), camera);
+  const hits = raycaster.intersectObject(lavaMesh);
+  return hits.length ? hits[0] : null;
+}
+
+let boulderDownId = null, boulderDownTime = 0, boulderDownX = 0, boulderDownY = 0;
+let holdTimer = null;
+const HOLD_MS = 220;
+
+canvas.addEventListener('pointerdown', (e) => {
+  const hit = pickBoulder(e);
+  if (hit) {
+    boulderDownId = hit.instanceId;
+    boulderDownTime = performance.now();
+    boulderDownX = e.clientX; boulderDownY = e.clientY;
+    clearTimeout(holdTimer);
+    const capturedId = hit.instanceId;
+    const capturedPoint = hit.point.clone();
+    holdTimer = setTimeout(() => {
+      if (boulderDownId === capturedId) triggerCrack(capturedId, capturedPoint);
+    }, HOLD_MS);
+    return;
+  }
+  const riverHit = pickRiver(e);
+  if (riverHit) {
+    const slotIndex = dragSlots.findIndex(s => !s.active);
+    if (slotIndex !== -1) {
+      const slot = dragSlots[slotIndex];
+      slot.active = true; slot.pointerId = e.pointerId;
+      slot.x = riverHit.point.x; slot.z = riverHit.point.z;
+      dragLastSpawn[slotIndex] = { x: riverHit.point.x, z: riverHit.point.z };
+      spawnDragQuad(riverHit.point.x, riverHit.point.z);
+    }
+  }
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  if (boulderDownId !== null) {
+    const dx = e.clientX - boulderDownX, dy = e.clientY - boulderDownY;
+    if (dx*dx + dy*dy > 400) {
+      clearTimeout(holdTimer);
+      boulderDownId = null;
+    }
+  }
+  const slotIndex = dragSlots.findIndex(s => s.active && s.pointerId === e.pointerId);
+  if (slotIndex !== -1) {
+    const slot = dragSlots[slotIndex];
+    const riverHit = pickRiver(e);
+    if (riverHit) {
+      slot.x = riverHit.point.x; slot.z = riverHit.point.z;
+      const last = dragLastSpawn[slotIndex];
+      const dx = riverHit.point.x - last.x, dz = riverHit.point.z - last.z;
+      if (Math.sqrt(dx*dx + dz*dz) >= DRAG_QUAD_SPACING) {
+        spawnDragQuad(riverHit.point.x, riverHit.point.z);
+        dragLastSpawn[slotIndex] = { x: riverHit.point.x, z: riverHit.point.z };
+      }
+    }
+  }
+});
+
+function releasePointer(e){
+  clearTimeout(holdTimer);
+  if (boulderDownId !== null && performance.now() - boulderDownTime < HOLD_MS) {
+    handleBoulderTap(boulderDownId);
+  }
+  boulderDownId = null;
+  const slot = dragSlots.find(s => s.pointerId === e.pointerId);
+  if (slot) { slot.active = false; slot.pointerId = null; }
+}
+window.addEventListener('pointerup', releasePointer);
+window.addEventListener('pointercancel', releasePointer);
+
+// ── Reset ─────────────────────────────────────────────────────────────────────
+document.getElementById('reset-btn').addEventListener('click', () => {
+  for (let i = 0; i < heatArray.length; i++) heatArray[i] = 0;
+  boulderGeo.attributes.aHeat.needsUpdate = true;
+  for (const c of activeCracks) { scene.remove(c.group); disposeGroup(c.group); }
+  activeCracks.length = 0;
+  for (const s of dragSlots) { s.active = false; s.strength = 0; s.x = 9999; s.z = 9999; s.pointerId = null; }
+  for (const item of dragQuadPool) { item.life = 0; item.mesh.visible = false; item.mesh.material.opacity = 0; }
+  for (let i = 0; i < dragLastSpawn.length; i++) dragLastSpawn[i] = null;
+  boulderDownId = null;
+  clearTimeout(holdTimer);
+});
+
+// ── Initial ambient bubbles ───────────────────────────────────────────────────
+for (let i = 0; i < 4; i++) trySpawnBubble();
+
+// ── FPS readout ───────────────────────────────────────────────────────────────
+const fpsEl = document.getElementById('fps');
+let fpsFrames = 0, fpsAccum = 0;
+
+// ── Render loop ───────────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  lavaMaterial.uniforms.uTime.value += dt;
+  updateDragSlots(dt);
+  updateDragQuads(dt);
+  updateBoulderHeat(dt);
+  updateBubbles(dt);
+  if (activeBubbleCount < 4) trySpawnBubble();
+  updateSmokeSpawning(dt);
+  updateSmoke(dt);
+  updateSplashes(dt);
+
+  renderer.render(scene, camera);
+
+  fpsFrames++; fpsAccum += dt;
+  if (fpsAccum >= 0.5) {
+    fpsEl.textContent = `${(fpsFrames/fpsAccum).toFixed(1)} fps`;
+    fpsFrames = 0; fpsAccum = 0;
+  }
+});
+
+// ── Console handle for future animation work ─────────────────────────────────
+window.__lava = { THREE, scene, camera, renderer, boulderMesh, boulderDefs, heatArray, triggerCrack, handleBoulderTap, dragSlots, dragQuadPool, activeCracks };
+</script>
+</body>
+</html>
