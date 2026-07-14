@@ -436,10 +436,10 @@ function buildCrackGroup(seed, normal, worldPoint, boulderRadius, id){
       const w1 = 0.18*(1 - (s+1)/pts.length * 0.5);
       const base = s*4;
       positions.push(
-        p0.x+nrm.x*w0, p0.y+nrm.y*w0, 0.001,
-        p0.x-nrm.x*w0, p0.y-nrm.y*w0, 0.001,
-        p1.x+nrm.x*w1, p1.y+nrm.y*w1, 0.001,
-        p1.x-nrm.x*w1, p1.y-nrm.y*w1, 0.001,
+        p0.x+nrm.x*w0, 0, p0.y+nrm.y*w0,
+        p0.x-nrm.x*w0, 0, p0.y-nrm.y*w0,
+        p1.x+nrm.x*w1, 0, p1.y+nrm.y*w1,
+        p1.x-nrm.x*w1, 0, p1.y-nrm.y*w1,
       );
       idx.push(base, base+2, base+1,  base+1, base+2, base+3);
     }
@@ -457,7 +457,6 @@ function buildCrackGroup(seed, normal, worldPoint, boulderRadius, id){
   group.position.x = worldPoint.x;
   group.position.z = worldPoint.z;
   group.position.y = boulderDefs[id].y + boulderDefs[id].radius + 0.05;
-  group.rotation.x = -Math.PI / 2;
   return group;
 }
 
