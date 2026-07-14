@@ -73,12 +73,24 @@ const range = (a,b) => a + rng() * (b - a);
 function smoothstepJS(a,b,x){ const t = Math.min(1, Math.max(0, (x-a)/(b-a))); return t*t*(3-2*t); }
 
 // ── Renderer / scene / camera (orthographic, straight top-down) ─────────────
-let W = window.innerWidth, H = window.innerHeight;
+// Use visualViewport when available — on iOS Safari, window.innerWidth/Height
+// can mismatch the actual visible area when the address/toolbar collapses or
+// expands, which throws off both the canvas size and touch coordinate mapping.
+function getViewportSize(){
+  if (window.visualViewport) {
+    return { w: window.visualViewport.width, h: window.visualViewport.height };
+  }
+  return { w: window.innerWidth, h: window.innerHeight };
+}
+
+let { w: W, h: H } = getViewportSize();
 const canvas = document.getElementById('canvas');
 const isMobile = window.matchMedia('(pointer: coarse)').matches;
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(isMobile ? Math.min(window.devicePixelRatio, 1.5) : Math.min(window.devicePixelRatio, 2));
+canvas.style.width = W + 'px';
+canvas.style.height = H + 'px';
 renderer.setSize(W, H);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -99,10 +111,13 @@ camera.position.set(0, 20, 0);
 camera.lookAt(0, 0, 0);
 
 let resizeTimer;
-window.addEventListener('resize', () => {
+function handleViewportResize(){
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    W = window.innerWidth; H = window.innerHeight;
+    const size = getViewportSize();
+    W = size.w; H = size.h;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
     camera.left   = -(W / H) * ORTHO_H;
     camera.right  =  (W / H) * ORTHO_H;
     camera.top    =  ORTHO_H;
@@ -110,7 +125,11 @@ window.addEventListener('resize', () => {
     camera.updateProjectionMatrix();
     renderer.setSize(W, H);
   }, 250);
-});
+}
+window.addEventListener('resize', handleViewportResize);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', handleViewportResize);
+}
 
 // ── Lights ────────────────────────────────────────────────────────────────────
 scene.add(new THREE.HemisphereLight(0x3a1c14, 0x0d0806, 0.78));
@@ -455,6 +474,7 @@ function triggerCrack(id, hitPoint){
   if (normal.lengthSq() < 1e-6) normal.set(0,1,0);
   const group = buildCrackGroup(id*1013 + activeCracks.length*97 + 7, normal, hitPoint, def.radius);
   scene.add(group);
+  dbg(`crack added at x=${group.position.x.toFixed(2)} y=${group.position.y.toFixed(2)} z=${group.position.z.toFixed(2)} children=${group.children.length}`);
   activeCracks.push({ id, group, startTime: performance.now() });
   if (activeCracks.length > 36) {
     const old = activeCracks.shift();
@@ -767,8 +787,8 @@ const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
 function ndcFromEvent(e){
   const rect = canvas.getBoundingClientRect();
-  ndc.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
-  ndc.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
+  ndc.x = Math.max(-1, Math.min(1,  ((e.clientX - rect.left) / rect.width)  * 2 - 1));
+  ndc.y = Math.max(-1, Math.min(1, -((e.clientY - rect.top)  / rect.height) * 2 + 1));
   return ndc;
 }
 function pickBoulder(e){
