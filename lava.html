@@ -412,9 +412,9 @@ function buildCrackGroup(seed, normal, worldPoint, boulderRadius, id){
   const crng = mulberry32(seed >>> 0);
   const crand = (a,b) => a + crng()*(b-a);
   const group = new THREE.Group();
-  const branches = 5 + Math.floor(crand(0,3));
+  const branches = 4 + Math.floor(crand(0, 4));
   for (let i = 0; i < branches; i++) {
-    const ang = (i/branches)*Math.PI*2 + crand(-0.3,0.3);
+    const ang = (i/branches)*Math.PI*2 + crand(-0.8, 0.8);
     const len = boulderRadius * crand(0.4, 0.8);
     const segs = 3 + Math.floor(crand(0,2));
     const pts = [new THREE.Vector2(0,0)];
@@ -446,7 +446,7 @@ function buildCrackGroup(seed, normal, worldPoint, boulderRadius, id){
     geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     geo.setIndex(idx);
     const mat = new THREE.MeshBasicMaterial({
-      color: 0xff3300, transparent: true, opacity: 0,
+      color: 0xcc1500, transparent: true, opacity: 0,
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
     const mesh = new THREE.Mesh(geo, mat);
@@ -499,16 +499,16 @@ function updateBoulderHeat(dt){
   for (let i = activeCracks.length - 1; i >= 0; i--) {
     const c = activeCracks[i];
     const elapsed = (now - c.startTime) / 1000;
-    const fillDur  = 0.8;
+    const fillDur  = 1.4;
     const holdDur  = 1.5;
     const fadeDur  = 5.0;
     let opacity = 0;
     if (elapsed < fillDur) {
       opacity = elapsed / fillDur;
     } else if (elapsed < fillDur + holdDur) {
-      opacity = 1.0;
+      opacity = 0.75;
     } else if (elapsed < fillDur + holdDur + fadeDur) {
-      opacity = 1.0 - (elapsed - fillDur - holdDur) / fadeDur;
+      opacity = 0.75 - (elapsed - fillDur - holdDur) / fadeDur * 0.75;
     } else {
       scene.remove(c.group);
       disposeGroup(c.group);
