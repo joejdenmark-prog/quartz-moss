@@ -410,6 +410,8 @@ scene.add(boulderMesh);
 // simulating a carved groove) and a thin lava-fill mesh on top whose
 // uFillLevel uniform sweeps outward from the crack's origin on tap, like
 // molten lava surging out through the fracture.
+const BAKED_CRACK_REST = 0.08;
+
 function buildCrackGeometry(seed, boulderRadius){
   const crng = mulberry32(seed >>> 0);
   const crand = (a,b) => a + crng()*(b-a);
@@ -464,7 +466,7 @@ function buildCrackGeometry(seed, boulderRadius){
 
 function makeCrackFillMaterial(){
   return new THREE.ShaderMaterial({
-    uniforms: { uFillLevel: { value: 0 }, uColor: { value: new THREE.Color(0xcc1500) } },
+    uniforms: { uFillLevel: { value: BAKED_CRACK_REST }, uColor: { value: new THREE.Color(0xff2200) } },
     transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
     vertexShader: `
       attribute float aDist;
@@ -488,7 +490,7 @@ function makeCrackFillMaterial(){
 }
 
 const shadowMat = new THREE.MeshBasicMaterial({
-  color: 0x000000, transparent: true, opacity: 0.85,
+  color: 0x1a0000, transparent: true, opacity: 0.95,
   depthWrite: false, blending: THREE.NormalBlending,
 });
 
@@ -501,7 +503,7 @@ const bakedCracks = boulderDefs.map((def, i) => {
   scene.add(mesh);
 
   const shadowMesh = new THREE.Mesh(crackGeo, shadowMat.clone());
-  shadowMesh.scale.set(1.8, 1, 1.8);
+  shadowMesh.scale.set(2.2, 1, 2.2);
   shadowMesh.position.copy(mesh.position);
   shadowMesh.position.y -= 0.01;
   shadowMesh.renderOrder = 4;
@@ -513,7 +515,6 @@ const bakedCracks = boulderDefs.map((def, i) => {
 // ── Boulder crack system — baked decals fill with lava on tap ───────────────
 const activeCracks = [];   // { id, startTime }
 const HEAT_DECAY = 0.16;
-const BAKED_CRACK_REST = 0.0;
 
 function disposeGroup(group){
   group.traverse(o => {
