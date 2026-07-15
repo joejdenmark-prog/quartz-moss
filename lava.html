@@ -406,53 +406,43 @@ boulderGeo.setAttribute('aRiverSide', new THREE.InstancedBufferAttribute(riverSi
 scene.add(boulderMesh);
 
 // ── Baked crack decals — one permanent groove mesh per boulder, generated
-// once at startup; tapping a boulder animates its own decal's opacity rather
-// than creating new geometry.
-const bakedCrackMat = new THREE.MeshBasicMaterial({
-  color: 0xcc1500, transparent: true, opacity: 0.02,
-  blending: THREE.AdditiveBlending, depthWrite: false,
-});
-const bakedCracks = boulderDefs.map((def, i) => {
-  const geo = buildCrackGeometry(i * 7919 + 13, def.radius);
-  const mat = bakedCrackMat.clone();
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.set(def.x, def.y + def.radius * 0.98, def.z);
-  mesh.renderOrder = 5;
-  scene.add(mesh);
-  return { mesh };
-});
-
-// ── Boulder crack system — permanent baked decal per boulder, glows on tap ──
-const activeCracks = [];   // { id, startTime }
-const HEAT_DECAY = 0.16;
-const BAKED_CRACK_REST = 0.02;
-const BAKED_CRACK_PEAK = 0.75;
-
+// once at startup. Each has a dark shadow layer underneath (always visible,
+// simulating a carved groove) and a thin lava-fill mesh on top whose
+// uFillLevel uniform sweeps outward from the crack's origin on tap, like
+// molten lava surging out through the fracture.
 function buildCrackGeometry(seed, boulderRadius){
   const crng = mulberry32(seed >>> 0);
   const crand = (a,b) => a + crng()*(b-a);
   const branches = 4 + Math.floor(crand(0, 4));
-  const positions = [], idx = [];
+  const positions = [], idx = [], dists = [];
   let vOff = 0;
+  const branchPts = [];
+  let maxReach = 0.0001;
   for (let i = 0; i < branches; i++) {
     const ang = (i/branches)*Math.PI*2 + crand(-0.8, 0.8);
     const len = boulderRadius * crand(0.4, 0.8);
     const segs = 3 + Math.floor(crand(0,2));
-    const pts = [new THREE.Vector2(0,0)];
-    let cx = 0, cy = 0, a = ang;
+    const pts = [{ p: new THREE.Vector2(0,0), d: 0 }];
+    let cx = 0, cy = 0, a = ang, cumLen = 0;
     for (let s = 0; s < segs; s++) {
       a += crand(-0.5, 0.5);
       const stepLen = len/segs;
       cx += Math.cos(a)*stepLen;
       cy += Math.sin(a)*stepLen;
-      pts.push(new THREE.Vector2(cx,cy));
+      cumLen += stepLen;
+      pts.push({ p: new THREE.Vector2(cx,cy), d: cumLen });
     }
+    maxReach = Math.max(maxReach, cumLen);
+    branchPts.push(pts);
+  }
+  for (const pts of branchPts) {
     for (let s = 0; s < pts.length-1; s++) {
-      const p0 = pts[s], p1 = pts[s+1];
+      const p0 = pts[s].p, p1 = pts[s+1].p;
+      const d0 = pts[s].d / maxReach, d1 = pts[s+1].d / maxReach;
       const dir = new THREE.Vector2().subVectors(p1,p0).normalize();
       const nrm = new THREE.Vector2(-dir.y, dir.x);
-      const w0 = 0.04 * (1 - s / pts.length * 0.5);
-      const w1 = 0.04 * (1 - (s+1) / pts.length * 0.5);
+      const w0 = 0.10 * (1 - s / pts.length * 0.3);
+      const w1 = 0.10 * (1 - (s+1) / pts.length * 0.3);
       const base = vOff;
       positions.push(
         p0.x+nrm.x*w0, 0, p0.y+nrm.y*w0,
@@ -460,15 +450,70 @@ function buildCrackGeometry(seed, boulderRadius){
         p1.x+nrm.x*w1, 0, p1.y+nrm.y*w1,
         p1.x-nrm.x*w1, 0, p1.y-nrm.y*w1,
       );
+      dists.push(d0, d0, d1, d1);
       idx.push(base, base+2, base+1,  base+1, base+2, base+3);
       vOff += 4;
     }
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('aDist', new THREE.Float32BufferAttribute(dists, 1));
   geo.setIndex(idx);
   return geo;
 }
+
+function makeCrackFillMaterial(){
+  return new THREE.ShaderMaterial({
+    uniforms: { uFillLevel: { value: 0 }, uColor: { value: new THREE.Color(0xcc1500) } },
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: `
+      attribute float aDist;
+      varying float vDist;
+      void main(){
+        vDist = aDist;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision mediump float;
+      varying float vDist;
+      uniform float uFillLevel;
+      uniform vec3 uColor;
+      void main(){
+        if (vDist > uFillLevel) discard;
+        gl_FragColor = vec4(uColor, 1.0);
+      }
+    `,
+  });
+}
+
+const shadowMat = new THREE.MeshBasicMaterial({
+  color: 0x000000, transparent: true, opacity: 0.85,
+  depthWrite: false, blending: THREE.NormalBlending,
+});
+
+const bakedCracks = boulderDefs.map((def, i) => {
+  const crackGeo = buildCrackGeometry(i * 7919 + 13, def.radius);
+
+  const mesh = new THREE.Mesh(crackGeo, makeCrackFillMaterial());
+  mesh.position.set(def.x, def.y + def.radius * 0.98, def.z);
+  mesh.renderOrder = 5;
+  scene.add(mesh);
+
+  const shadowMesh = new THREE.Mesh(crackGeo, shadowMat.clone());
+  shadowMesh.scale.set(1.8, 1, 1.8);
+  shadowMesh.position.copy(mesh.position);
+  shadowMesh.position.y -= 0.01;
+  shadowMesh.renderOrder = 4;
+  scene.add(shadowMesh);
+
+  return { mesh, shadowMesh };
+});
+
+// ── Boulder crack system — baked decals fill with lava on tap ───────────────
+const activeCracks = [];   // { id, startTime }
+const HEAT_DECAY = 0.16;
+const BAKED_CRACK_REST = 0.0;
 
 function disposeGroup(group){
   group.traverse(o => {
@@ -485,7 +530,7 @@ function triggerCrack(id, hitPoint){
     activeCracks.push({ id, startTime: performance.now() });
     if (activeCracks.length > 36) {
       const old = activeCracks.shift();
-      bakedCracks[old.id].mesh.material.opacity = BAKED_CRACK_REST;
+      bakedCracks[old.id].mesh.material.uniforms.uFillLevel.value = BAKED_CRACK_REST;
     }
   }
   heatArray[id] = 1.0;
@@ -508,22 +553,22 @@ function updateBoulderHeat(dt){
   for (let i = activeCracks.length - 1; i >= 0; i--) {
     const c = activeCracks[i];
     const elapsed = (now - c.startTime) / 1000;
-    const fillDur  = 1.4;
-    const holdDur  = 1.5;
-    const fadeDur  = 5.0;
-    let opacity = BAKED_CRACK_REST;
+    const fillDur  = 1.5;
+    const holdDur  = 1.0;
+    const drainDur = 4.0;
+    let level = BAKED_CRACK_REST;
     if (elapsed < fillDur) {
-      opacity = BAKED_CRACK_REST + (BAKED_CRACK_PEAK - BAKED_CRACK_REST) * (elapsed / fillDur);
+      level = elapsed / fillDur;
     } else if (elapsed < fillDur + holdDur) {
-      opacity = BAKED_CRACK_PEAK;
-    } else if (elapsed < fillDur + holdDur + fadeDur) {
-      opacity = BAKED_CRACK_PEAK - (BAKED_CRACK_PEAK - BAKED_CRACK_REST) * (elapsed - fillDur - holdDur) / fadeDur;
+      level = 1.0;
+    } else if (elapsed < fillDur + holdDur + drainDur) {
+      level = 1.0 - (elapsed - fillDur - holdDur) / drainDur;
     } else {
-      bakedCracks[c.id].mesh.material.opacity = BAKED_CRACK_REST;
+      bakedCracks[c.id].mesh.material.uniforms.uFillLevel.value = BAKED_CRACK_REST;
       activeCracks.splice(i, 1);
       continue;
     }
-    bakedCracks[c.id].mesh.material.opacity = opacity;
+    bakedCracks[c.id].mesh.material.uniforms.uFillLevel.value = level;
   }
 }
 
@@ -877,7 +922,7 @@ window.addEventListener('pointercancel', releasePointer);
 document.getElementById('reset-btn').addEventListener('click', () => {
   for (let i = 0; i < heatArray.length; i++) heatArray[i] = 0;
   boulderGeo.attributes.aHeat.needsUpdate = true;
-  for (const c of activeCracks) { bakedCracks[c.id].mesh.material.opacity = BAKED_CRACK_REST; }
+  for (const c of activeCracks) { bakedCracks[c.id].mesh.material.uniforms.uFillLevel.value = BAKED_CRACK_REST; }
   activeCracks.length = 0;
   for (const s of dragSlots) { s.active = false; s.strength = 0; s.x = 9999; s.z = 9999; s.pointerId = null; }
   for (const item of dragQuadPool) { item.life = 0; item.mesh.visible = false; item.mesh.material.opacity = 0; }
