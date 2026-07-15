@@ -48,7 +48,6 @@
 </head>
 <body>
 <canvas id="canvas"></canvas>
-<div id="debug" style="position:fixed;top:40px;left:0;z-index:9999;background:rgba(0,0,0,0.7);color:lime;font-size:11px;padding:6px;max-width:100%;pointer-events:none;"></div>
 <div id="vignette"></div>
 <div id="fps">-- fps</div>
 <button id="reset-btn" title="Reset">↺</button>
@@ -416,7 +415,7 @@ function buildCrackGroup(seed, normal, worldPoint, boulderRadius, id){
   const branches = 5 + Math.floor(crand(0,3));
   for (let i = 0; i < branches; i++) {
     const ang = (i/branches)*Math.PI*2 + crand(-0.3,0.3);
-    const len = boulderRadius * crand(1.2, 2.0);
+    const len = boulderRadius * crand(0.4, 0.8);
     const segs = 3 + Math.floor(crand(0,2));
     const pts = [new THREE.Vector2(0,0)];
     let cx = 0, cy = 0, a = ang;
@@ -432,8 +431,8 @@ function buildCrackGroup(seed, normal, worldPoint, boulderRadius, id){
       const p0 = pts[s], p1 = pts[s+1];
       const dir = new THREE.Vector2().subVectors(p1,p0).normalize();
       const nrm = new THREE.Vector2(-dir.y, dir.x);
-      const w0 = 0.18*(1 - s/pts.length * 0.5);
-      const w1 = 0.18*(1 - (s+1)/pts.length * 0.5);
+      const w0 = 0.08 * (1 - s / pts.length * 0.5);
+      const w1 = 0.08 * (1 - (s+1) / pts.length * 0.5);
       const base = s*4;
       positions.push(
         p0.x+nrm.x*w0, 0, p0.y+nrm.y*w0,
@@ -447,7 +446,7 @@ function buildCrackGroup(seed, normal, worldPoint, boulderRadius, id){
     geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     geo.setIndex(idx);
     const mat = new THREE.MeshBasicMaterial({
-      color: 0xff0000, transparent: true, opacity: 1.0,
+      color: 0xff3300, transparent: true, opacity: 0,
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
     const mesh = new THREE.Mesh(geo, mat);
@@ -474,7 +473,6 @@ function triggerCrack(id, hitPoint){
   if (normal.lengthSq() < 1e-6) normal.set(0,1,0);
   const group = buildCrackGroup(id*1013 + activeCracks.length*97 + 7, normal, hitPoint, def.radius, id);
   scene.add(group);
-  dbg(`crack at x=${group.position.x.toFixed(2)} y=${group.position.y.toFixed(2)} z=${group.position.z.toFixed(2)} boulderY=${boulderDefs[id].y.toFixed(2)} r=${boulderDefs[id].radius.toFixed(2)}`);
   activeCracks.push({ id, group, startTime: performance.now() });
   if (activeCracks.length > 36) {
     const old = activeCracks.shift();
@@ -506,7 +504,7 @@ function updateBoulderHeat(dt){
     const fadeDur  = 5.0;
     let opacity = 0;
     if (elapsed < fillDur) {
-      opacity = 0.3 + (elapsed / fillDur) * 0.7;
+      opacity = elapsed / fillDur;
     } else if (elapsed < fillDur + holdDur) {
       opacity = 1.0;
     } else if (elapsed < fillDur + holdDur + fadeDur) {
@@ -807,15 +805,8 @@ let holdTimer = null;
 const HOLD_MS = 220;
 let lastBoulderHitPoint = new THREE.Vector3();
 
-function dbg(msg) {
-  document.getElementById('debug').innerHTML = msg + '<br>' + document.getElementById('debug').innerHTML;
-}
-
 canvas.addEventListener('pointerdown', (e) => {
-  const rect = canvas.getBoundingClientRect();
-  dbg(`down: clientX=${e.clientX.toFixed(0)} clientY=${e.clientY.toFixed(0)} rect=${rect.width.toFixed(0)}x${rect.height.toFixed(0)}`);
   const hit = pickBoulder(e);
-  dbg(`boulder hit: ${hit ? 'YES id=' + hit.instanceId : 'NO'}`);
   if (hit) {
     boulderDownId = hit.instanceId;
     boulderDownTime = performance.now();
@@ -862,14 +853,10 @@ canvas.addEventListener('pointermove', (e) => {
 
 function releasePointer(e){
   const elapsed = performance.now() - boulderDownTime;
-  dbg(`release: boulderDownId=${boulderDownId} elapsed=${elapsed.toFixed(0)}ms`);
   clearTimeout(holdTimer);
   if (boulderDownId !== null && elapsed < HOLD_MS) {
-    dbg(`TAP confirmed — calling handleBoulderTap and triggerCrack`);
     handleBoulderTap(boulderDownId);
     triggerCrack(boulderDownId, lastBoulderHitPoint);
-  } else {
-    dbg(`tap rejected — elapsed too long or boulderDownId null`);
   }
   boulderDownId = null;
   const slot = dragSlots.find(s => s.pointerId === e.pointerId);
