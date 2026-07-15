@@ -131,13 +131,18 @@ if (window.visualViewport) {
 }
 
 // ── Lights ────────────────────────────────────────────────────────────────────
-scene.add(new THREE.HemisphereLight(0x3a1c14, 0x0d0806, 0.78));
+scene.add(new THREE.HemisphereLight(0x2a1a10, 0x050302, 1.2));
 const sun = new THREE.DirectionalLight(0xffa070, 0.95);
 sun.position.set(-6, 14, 4);
+sun.color.set(0xffe0c0);
+sun.intensity = 1.4;
 scene.add(sun);
 const fillLight = new THREE.DirectionalLight(0x3a1a10, 0.20);
 fillLight.position.set(5, 8, -6);
 scene.add(fillLight);
+const rimLight = new THREE.DirectionalLight(0x1a0a05, 0.45);
+rimLight.position.set(8, 6, 8);
+scene.add(rimLight);
 
 // ── River path shape (centerline + width, in world units) ───────────────────
 const HW = camera.right;                      // half visible width at startup
@@ -324,7 +329,7 @@ boulderMaterial.onBeforeCompile = (shader) => {
       totalEmissiveRadiance += riverGlowColor * vRiverGlow * vRiverFacing * 0.425;
       // baseline visibility floor — without this, this dark an albedo gets
       // crushed to pure black by the tone curve tuned for the bright lava.
-      totalEmissiveRadiance += vec3(0.046,0.037,0.030);`);
+      totalEmissiveRadiance += vec3(0.028, 0.020, 0.016);`);
 };
 
 // Multi-tier scatter: large boulders first, then medium, then small — each
@@ -371,9 +376,11 @@ const riverSideArray = new Float32Array(boulderDefs.length);
   const dummy = new THREE.Object3D();
   const col = new THREE.Color();
   const rockPalette = [
-    new THREE.Color(0x080808),
-    new THREE.Color(0x0f0d0c),
-    new THREE.Color(0x0a0907),
+    new THREE.Color(0x050504), // near black
+    new THREE.Color(0x1a1208), // very dark warm brown
+    new THREE.Color(0x0d0d0e), // cool dark charcoal
+    new THREE.Color(0x120e0a), // dark brown-black
+    new THREE.Color(0x080a08), // dark green-black
   ];
   boulderDefs.forEach((b, i) => {
     const sy = b.radius * range(0.55, 0.8);
@@ -386,8 +393,8 @@ const riverSideArray = new Float32Array(boulderDefs.length);
     dummy.scale.set(sx, sy, sz);
     dummy.updateMatrix();
     boulderMesh.setMatrixAt(i, dummy.matrix);
-    const pa = rockPalette[Math.floor(range(0, 3))];
-    const pb = rockPalette[Math.floor(range(0, 3))];
+    const pa = rockPalette[Math.floor(range(0, 5))];
+    const pb = rockPalette[Math.floor(range(0, 5))];
     col.copy(pa).lerp(pb, range(0, 1));
     boulderMesh.setColorAt(i, col);
 
