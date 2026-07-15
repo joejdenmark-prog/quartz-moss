@@ -300,6 +300,8 @@ const boulderGeo = new THREE.DodecahedronGeometry(1, 0);
 const boulderMaterial = new THREE.MeshStandardMaterial({
   color: 0xffffff, roughness: 0.98, metalness: 0.0, flatShading: true,
 });
+boulderMaterial.emissive = new THREE.Color(0x000000);
+boulderMaterial.emissiveIntensity = 0;
 boulderMaterial.onBeforeCompile = (shader) => {
   shader.vertexShader = shader.vertexShader
     .replace('#include <common>', `#include <common>
@@ -369,9 +371,9 @@ const riverSideArray = new Float32Array(boulderDefs.length);
   const dummy = new THREE.Object3D();
   const col = new THREE.Color();
   const rockPalette = [
-    new THREE.Color(0x0a0a0a),
-    new THREE.Color(0x111111),
-    new THREE.Color(0x0d0d0d),
+    new THREE.Color(0x080808),
+    new THREE.Color(0x0f0d0c),
+    new THREE.Color(0x0a0907),
   ];
   boulderDefs.forEach((b, i) => {
     const sy = b.radius * range(0.55, 0.8);
@@ -407,14 +409,14 @@ scene.add(boulderMesh);
 // once at startup; tapping a boulder animates its own decal's opacity rather
 // than creating new geometry.
 const bakedCrackMat = new THREE.MeshBasicMaterial({
-  color: 0xcc1500, transparent: true, opacity: 0.05,
+  color: 0xcc1500, transparent: true, opacity: 0.02,
   blending: THREE.AdditiveBlending, depthWrite: false,
 });
 const bakedCracks = boulderDefs.map((def, i) => {
   const geo = buildCrackGeometry(i * 7919 + 13, def.radius);
   const mat = bakedCrackMat.clone();
   const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.set(def.x, def.y + def.radius * 0.9, def.z);
+  mesh.position.set(def.x, def.y + def.radius * 0.98, def.z);
   mesh.renderOrder = 5;
   scene.add(mesh);
   return { mesh };
@@ -423,7 +425,7 @@ const bakedCracks = boulderDefs.map((def, i) => {
 // ── Boulder crack system — permanent baked decal per boulder, glows on tap ──
 const activeCracks = [];   // { id, startTime }
 const HEAT_DECAY = 0.16;
-const BAKED_CRACK_REST = 0.05;
+const BAKED_CRACK_REST = 0.02;
 const BAKED_CRACK_PEAK = 0.75;
 
 function buildCrackGeometry(seed, boulderRadius){
