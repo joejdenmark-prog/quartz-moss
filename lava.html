@@ -260,10 +260,10 @@ const lavaMaterial = new THREE.ShaderMaterial({
       float bank = smoothstep(edgeFrac*0.62, edgeFrac*1.05, c);
       col = mix(col, crustColor*0.6, bank*0.95);
 
-      // gently mute the very top edge so a stray bright vein cluster there
-      // never reads as a glitchy hotspot right at the screen boundary.
-      float topFade = smoothstep(${(-ORTHO_H).toFixed(3)}, ${(-ORTHO_H/3).toFixed(3)}, vWorldPos.z);
-      col *= mix(0.55, 1.0, topFade);
+      // gently mute the upper portion so the transition from dark top edge
+      // to full brightness is gradual rather than a visible seam.
+      float topFade = smoothstep(${(-ORTHO_H).toFixed(3)}, ${(-ORTHO_H*0.55).toFixed(3)}, vWorldPos.z);
+      col *= mix(0.5, 1.0, topFade);
 
       gl_FragColor = vec4(col, 1.0);
     }
@@ -342,11 +342,34 @@ const BOULDER_Z_MARGIN = ORTHO_H * 1.2; // extra reach past the river's ends so 
 function inRiver(x, z, buffer){
   return Math.abs(x - centerX(z)) < riverHalfWidthNominal(z) + buffer;
 }
+// Uniform spatial hash for collision checks — with tens of thousands of
+// candidates in the dense filler pass, a linear scan against every existing
+// boulder would be far too slow, so neighbors are looked up by grid cell
+// instead. Cell size comfortably exceeds the largest possible collision
+// radius so only the 3x3 neighborhood ever needs checking.
+const COLLISION_CELL = 2.6;
+const collisionGrid = new Map();
+function cellKey(gx, gz){ return gx + ',' + gz; }
+function addToGrid(idx){
+  const b = boulderDefs[idx];
+  const key = cellKey(Math.floor(b.x/COLLISION_CELL), Math.floor(b.z/COLLISION_CELL));
+  let bucket = collisionGrid.get(key);
+  if (!bucket) { bucket = []; collisionGrid.set(key, bucket); }
+  bucket.push(idx);
+}
 function tooClose(x, z, radius, factor){
-  for (const b of boulderDefs) {
-    const dx = x - b.x, dz = z - b.z;
-    const minDist = (radius + b.radius) * factor;
-    if (dx*dx + dz*dz < minDist*minDist) return true;
+  const gx = Math.floor(x/COLLISION_CELL), gz = Math.floor(z/COLLISION_CELL);
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      const bucket = collisionGrid.get(cellKey(gx+dx, gz+dz));
+      if (!bucket) continue;
+      for (const idx of bucket) {
+        const b = boulderDefs[idx];
+        const ddx = x - b.x, ddz = z - b.z;
+        const minDist = (radius + b.radius) * factor;
+        if (ddx*ddx + ddz*ddz < minDist*minDist) return true;
+      }
+    }
   }
   return false;
 }
@@ -362,12 +385,14 @@ function scatterTier(cell, riverBuffer, radiusMin, radiusMax, packFactor){
       if (Math.abs(jx) > BOUNDS_X) continue;
       if (tooClose(jx, jz, radius, packFactor)) continue;
       boulderDefs.push({ x: jx, z: jz, radius });
+      addToGrid(boulderDefs.length - 1);
     }
   }
 }
 
 scatterTier(1.30, 0.12, 0.50, 1.15, 0.62); // large, chunky anchor rocks
 scatterTier(0.62, 0.06, 0.30, 0.52, 0.68); // medium, fills the bigger gaps
+scatterTier(0.36, 0.02, 0.16, 0.30, 0.50); // small filler, closes remaining pinholes of bare ground
 
 const boulderMesh = new THREE.InstancedMesh(boulderGeo, boulderMaterial, boulderDefs.length);
 const heatArray = new Float32Array(boulderDefs.length);
@@ -390,7 +415,7 @@ const riverSideArray = new Float32Array(boulderDefs.length);
     const y = sy * 0.32;
     b.y = y;
     dummy.position.set(b.x, y, b.z);
-    dummy.rotation.set(range(-0.3,0.3), range(0,Math.PI*2), range(-0.3,0.3));
+    dummy.rotation.set(range(-0.45,0.45), range(0,Math.PI*2), range(-0.45,0.45));
     dummy.scale.set(sx, sy, sz);
     dummy.updateMatrix();
     boulderMesh.setMatrixAt(i, dummy.matrix);
