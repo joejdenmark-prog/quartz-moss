@@ -247,8 +247,9 @@ const lavaMaterial = new THREE.ShaderMaterial({
       vec3 crustColor = vec3(0.185,0.0088,0.0048);
 
       vec3 col = mix(darkBase, midBase, n1);
-      col = mix(col, brightVein, veins*0.22);
+      col = mix(col, brightVein, veins*0.32);
       col = mix(col, crustColor, clamp(crust,0.0,1.0)*0.75);
+      col.r = max(col.r, 0.185);
 
       float c = abs(vUv.x-0.5)*2.0;
 
@@ -259,14 +260,10 @@ const lavaMaterial = new THREE.ShaderMaterial({
       float bank = smoothstep(edgeFrac*0.62, edgeFrac*1.05, c);
       col = mix(col, crustColor*0.6, bank*0.95);
 
-      // gently mute the upper portion so a stray bright vein cluster there
+      // gently mute the very top edge so a stray bright vein cluster there
       // never reads as a glitchy hotspot right at the screen boundary.
-      float topFade = smoothstep(${(-ORTHO_H).toFixed(3)}, ${(-ORTHO_H/2).toFixed(3)}, vWorldPos.z);
-      col *= mix(0.45, 1.0, topFade);
-
-      // brightness floor so the darkest parts of the flow never read as
-      // near-black — keeps the color consistent from top to bottom.
-      col.r = max(col.r, 0.353);
+      float topFade = smoothstep(${(-ORTHO_H).toFixed(3)}, ${(-ORTHO_H/3).toFixed(3)}, vWorldPos.z);
+      col *= mix(0.55, 1.0, topFade);
 
       gl_FragColor = vec4(col, 1.0);
     }
