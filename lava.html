@@ -131,7 +131,7 @@ if (window.visualViewport) {
 }
 
 // ── Lights ────────────────────────────────────────────────────────────────────
-scene.add(new THREE.HemisphereLight(0x2a1a10, 0x050302, 1.2));
+scene.add(new THREE.HemisphereLight(0x3a2010, 0x040201, 1.4));
 const sun = new THREE.DirectionalLight(0xffa070, 0.95);
 sun.position.set(-6, 14, 4);
 sun.color.set(0xffe0c0);
@@ -152,7 +152,7 @@ const ampA = HW * 0.22, ampB = HW * 0.09;
 function centerX(z){ return Math.sin(z*0.34+1.3)*ampA + Math.sin(z*0.15+0.6)*ampB; }
 function halfWidth(z){ return baseHalfWidth + Math.sin(z*0.19+2.1)*widthVar; }
 
-const RIVER_LENGTH = ORTHO_H * 3.0;
+const RIVER_LENGTH = ORTHO_H * 3.6;
 const Z0 = -RIVER_LENGTH / 2;
 const EDGE_BLEED = 0.75; // extra lava width hidden under the innermost boulder ring
 
@@ -242,12 +242,12 @@ const lavaMaterial = new THREE.ShaderMaterial({
       float veins = smoothstep(0.56, 0.80, n1*0.6 + n2*0.4);
 
       vec3 darkBase   = vec3(0.336,0.0144,0.008);
-      vec3 midBase    = vec3(0.436,0.0224,0.0112);
-      vec3 brightVein = vec3(0.48,0.15,0.045);
+      vec3 midBase    = vec3(0.37,0.019,0.0095);
+      vec3 brightVein = vec3(0.36,0.11,0.034);
       vec3 crustColor = vec3(0.185,0.0088,0.0048);
 
       vec3 col = mix(darkBase, midBase, n1);
-      col = mix(col, brightVein, veins*0.45);
+      col = mix(col, brightVein, veins*0.32);
       col = mix(col, crustColor, clamp(crust,0.0,1.0)*0.75);
       col.r = max(col.r, 0.185);
 
@@ -280,7 +280,7 @@ scene.add(lavaMesh);
 function riverHalfWidthNominal(z){ return halfWidth(z); }
 
 // ── Ground plane (cooled rock bed beneath the boulder field) ─────────────────
-const groundGeo = new THREE.PlaneGeometry(HW*8.4, RIVER_LENGTH);
+const groundGeo = new THREE.PlaneGeometry(HW*9.6, RIVER_LENGTH);
 groundGeo.rotateX(-Math.PI/2);
 const groundMat = new THREE.MeshStandardMaterial({ color: 0x4a1a0a, roughness: 1.0, metalness: 0.0, emissive: new THREE.Color(0x1a0000), emissiveIntensity: 0.8 });
 const groundMesh = new THREE.Mesh(groundGeo, groundMat);
@@ -336,7 +336,7 @@ boulderMaterial.onBeforeCompile = (shader) => {
 // later pass fills the gaps the previous pass left, so the banks read as
 // dense packed rock rather than pebbles scattered on black ground.
 const boulderDefs = [];
-const BOUNDS_X = HW * 4.0;
+const BOUNDS_X = HW * 4.6;
 
 function inRiver(x, z, buffer){
   return Math.abs(x - centerX(z)) < riverHalfWidthNominal(z) + buffer;
@@ -430,7 +430,7 @@ function buildCrackGeometry(seed, boulderRadius){
   for (let i = 0; i < branches; i++) {
     const ang = (i/branches)*Math.PI*2 + crand(-0.8, 0.8);
     const len = boulderRadius * crand(0.7, 1.2);
-    const segs = 3 + Math.floor(crand(0,2));
+    const segs = 4 + Math.floor(crand(0, 3));
     const pts = [{ p: new THREE.Vector2(0,0), d: 0 }];
     let cx = 0, cy = 0, a = ang, cumLen = 0;
     for (let s = 0; s < segs; s++) {
