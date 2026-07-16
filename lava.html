@@ -247,9 +247,8 @@ const lavaMaterial = new THREE.ShaderMaterial({
       vec3 crustColor = vec3(0.185,0.0088,0.0048);
 
       vec3 col = mix(darkBase, midBase, n1);
-      col = mix(col, brightVein, veins*0.32);
+      col = mix(col, brightVein, veins*0.22);
       col = mix(col, crustColor, clamp(crust,0.0,1.0)*0.75);
-      col.r = max(col.r, 0.185);
 
       float c = abs(vUv.x-0.5)*2.0;
 
@@ -260,10 +259,14 @@ const lavaMaterial = new THREE.ShaderMaterial({
       float bank = smoothstep(edgeFrac*0.62, edgeFrac*1.05, c);
       col = mix(col, crustColor*0.6, bank*0.95);
 
-      // gently mute the very top edge so a stray bright vein cluster there
+      // gently mute the upper portion so a stray bright vein cluster there
       // never reads as a glitchy hotspot right at the screen boundary.
-      float topFade = smoothstep(${(-ORTHO_H).toFixed(3)}, ${(-ORTHO_H/3).toFixed(3)}, vWorldPos.z);
-      col *= mix(0.55, 1.0, topFade);
+      float topFade = smoothstep(${(-ORTHO_H).toFixed(3)}, ${(-ORTHO_H/2).toFixed(3)}, vWorldPos.z);
+      col *= mix(0.45, 1.0, topFade);
+
+      // brightness floor so the darkest parts of the flow never read as
+      // near-black — keeps the color consistent from top to bottom.
+      col.r = max(col.r, 0.353);
 
       gl_FragColor = vec4(col, 1.0);
     }
@@ -280,7 +283,7 @@ scene.add(lavaMesh);
 function riverHalfWidthNominal(z){ return halfWidth(z); }
 
 // ── Ground plane (cooled rock bed beneath the boulder field) ─────────────────
-const groundGeo = new THREE.PlaneGeometry(HW*9.6, RIVER_LENGTH);
+const groundGeo = new THREE.PlaneGeometry(HW*12.4, RIVER_LENGTH + ORTHO_H*2.4);
 groundGeo.rotateX(-Math.PI/2);
 const groundMat = new THREE.MeshStandardMaterial({ color: 0x4a1a0a, roughness: 1.0, metalness: 0.0, emissive: new THREE.Color(0x1a0000), emissiveIntensity: 0.8 });
 const groundMesh = new THREE.Mesh(groundGeo, groundMat);
@@ -336,7 +339,8 @@ boulderMaterial.onBeforeCompile = (shader) => {
 // later pass fills the gaps the previous pass left, so the banks read as
 // dense packed rock rather than pebbles scattered on black ground.
 const boulderDefs = [];
-const BOUNDS_X = HW * 4.6;
+const BOUNDS_X = HW * 5.6;
+const BOULDER_Z_MARGIN = ORTHO_H * 1.2; // extra reach past the river's ends so far top/bottom edges never show bare ground
 
 function inRiver(x, z, buffer){
   return Math.abs(x - centerX(z)) < riverHalfWidthNominal(z) + buffer;
@@ -350,14 +354,14 @@ function tooClose(x, z, radius, factor){
   return false;
 }
 function scatterTier(cell, riverBuffer, radiusMin, radiusMax, packFactor){
-  for (let z = Z0; z <= Z0 + RIVER_LENGTH; z += cell) {
+  for (let z = Z0 - BOULDER_Z_MARGIN; z <= Z0 + RIVER_LENGTH + BOULDER_Z_MARGIN; z += cell) {
     for (let x = -BOUNDS_X; x <= BOUNDS_X; x += cell) {
       const jx = x + range(-cell*0.42, cell*0.42);
       const jz = z + range(-cell*0.42, cell*0.42);
       const radius = range(radiusMin, radiusMax);
       // Scale the river exclusion by this boulder's own radius so large
       // rocks can't visually intrude deep into the flow near the bank.
-      if (inRiver(jx, jz, riverBuffer + radius*0.55)) continue;
+      if (inRiver(jx, jz, riverBuffer + radius*0.40)) continue;
       if (Math.abs(jx) > BOUNDS_X) continue;
       if (tooClose(jx, jz, radius, packFactor)) continue;
       boulderDefs.push({ x: jx, z: jz, radius });
@@ -365,8 +369,8 @@ function scatterTier(cell, riverBuffer, radiusMin, radiusMax, packFactor){
   }
 }
 
-scatterTier(1.30, 0.16, 0.50, 1.15, 0.62); // large, chunky anchor rocks
-scatterTier(0.62, 0.12, 0.30, 0.52, 0.68); // medium, fills the bigger gaps
+scatterTier(1.30, 0.12, 0.50, 1.15, 0.62); // large, chunky anchor rocks
+scatterTier(0.62, 0.06, 0.30, 0.52, 0.68); // medium, fills the bigger gaps
 
 const boulderMesh = new THREE.InstancedMesh(boulderGeo, boulderMaterial, boulderDefs.length);
 const heatArray = new Float32Array(boulderDefs.length);
@@ -429,8 +433,8 @@ function buildCrackGeometry(seed, boulderRadius){
   let maxReach = 0.0001;
   for (let i = 0; i < branches; i++) {
     const ang = (i/branches)*Math.PI*2 + crand(-0.8, 0.8);
-    const len = boulderRadius * crand(0.7, 1.2);
-    const segs = 4 + Math.floor(crand(0, 3));
+    const len = boulderRadius * crand(0.9, 1.5);
+    const segs = 5 + Math.floor(crand(0, 3));
     const pts = [{ p: new THREE.Vector2(0,0), d: 0 }];
     let cx = 0, cy = 0, a = ang, cumLen = 0;
     for (let s = 0; s < segs; s++) {
