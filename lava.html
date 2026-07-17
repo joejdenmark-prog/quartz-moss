@@ -249,7 +249,6 @@ const lavaMaterial = new THREE.ShaderMaterial({
       vec3 col = mix(darkBase, midBase, n1);
       col = mix(col, brightVein, veins*0.32);
       col = mix(col, crustColor, clamp(crust,0.0,1.0)*0.75);
-      col.r = max(col.r, 0.185);
 
       float c = abs(vUv.x-0.5)*2.0;
 
@@ -264,6 +263,10 @@ const lavaMaterial = new THREE.ShaderMaterial({
       // to full brightness is gradual rather than a visible seam.
       float topFade = smoothstep(${(-ORTHO_H).toFixed(3)}, ${(-ORTHO_H*0.55).toFixed(3)}, vWorldPos.z);
       col *= mix(0.5, 1.0, topFade);
+
+      // absolute brightness floor — the darkest parts of the flow must never
+      // read as near-black, regardless of bank/crust darkening or top fade.
+      col.r = max(col.r, 0.333);
 
       gl_FragColor = vec4(col, 1.0);
     }
@@ -336,7 +339,7 @@ boulderMaterial.onBeforeCompile = (shader) => {
 // later pass fills the gaps the previous pass left, so the banks read as
 // dense packed rock rather than pebbles scattered on black ground.
 const boulderDefs = [];
-const BOUNDS_X = HW * 7.2;
+const BOUNDS_X = HW * 7.2 + 2;
 const BOULDER_Z_MARGIN = ORTHO_H * 1.2; // extra reach past the river's ends so far top/bottom edges never show bare ground
 
 function inRiver(x, z, buffer){
@@ -622,10 +625,12 @@ function makeBubbleMaterial(){
       void main(){
         float rim = pow(1.0 - clamp(vN.y, 0.0, 1.0), 1.6);
         vec3 linearColor = mix(uCenter, uRim, rim);
-        // this material bypasses the standard material chunks, so the
-        // linear -> output colorspace conversion has to be done by hand or
-        // the bubbles render far too dark and blend into the lava.
-        gl_FragColor = vec4(pow(linearColor, vec3(0.4545)), 1.0);
+        // this material bypasses the standard material chunks, so it needs
+        // its own brightness boost or it renders far too dark and blends
+        // into the lava — a uniform multiplier (not a pow curve) keeps the
+        // R:G:B ratio intact so the bubble stays dark crimson instead of
+        // washing out toward gray/white.
+        gl_FragColor = vec4(clamp(linearColor * 2.3, 0.0, 1.0), 1.0);
       }
     `,
   });
