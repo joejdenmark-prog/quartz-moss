@@ -146,6 +146,7 @@ scene.add(rimLight);
 
 // ── River path shape (centerline + width, in world units) ───────────────────
 const HW = camera.right;                      // half visible width at startup
+const BOUNDS_X = HW * 7.2 + 5;                 // boulder field half-width — comfortably past the visible edges on both sides
 const baseHalfWidth = HW * 0.50;
 const widthVar      = HW * 0.035;
 const ampA = HW * 0.22, ampB = HW * 0.09;
@@ -259,13 +260,8 @@ const lavaMaterial = new THREE.ShaderMaterial({
       float bank = smoothstep(edgeFrac*0.62, edgeFrac*1.05, c);
       col = mix(col, crustColor*0.6, bank*0.95);
 
-      // gently mute the upper portion so the transition from dark top edge
-      // to full brightness is gradual rather than a visible seam.
-      float topFade = smoothstep(${(-ORTHO_H).toFixed(3)}, ${(-ORTHO_H*0.55).toFixed(3)}, vWorldPos.z);
-      col *= mix(0.68, 1.0, topFade);
-
       // absolute brightness floor — the darkest parts of the flow must never
-      // read as near-black, regardless of bank/crust darkening or top fade.
+      // read as near-black, regardless of bank/crust darkening.
       col.r = max(col.r, 0.333);
 
       gl_FragColor = vec4(col, 1.0);
@@ -283,7 +279,7 @@ scene.add(lavaMesh);
 function riverHalfWidthNominal(z){ return halfWidth(z); }
 
 // ── Ground plane (cooled rock bed beneath the boulder field) ─────────────────
-const groundGeo = new THREE.PlaneGeometry(HW*12.4, RIVER_LENGTH + ORTHO_H*2.4);
+const groundGeo = new THREE.PlaneGeometry(BOUNDS_X*2 + 4, RIVER_LENGTH + ORTHO_H*2.4);
 groundGeo.rotateX(-Math.PI/2);
 const groundMat = new THREE.MeshStandardMaterial({ color: 0x4a1a0a, roughness: 1.0, metalness: 0.0, emissive: new THREE.Color(0x1a0000), emissiveIntensity: 0.8 });
 const groundMesh = new THREE.Mesh(groundGeo, groundMat);
@@ -339,7 +335,6 @@ boulderMaterial.onBeforeCompile = (shader) => {
 // later pass fills the gaps the previous pass left, so the banks read as
 // dense packed rock rather than pebbles scattered on black ground.
 const boulderDefs = [];
-const BOUNDS_X = HW * 7.2 + 2;
 const BOULDER_Z_MARGIN = ORTHO_H * 1.2; // extra reach past the river's ends so far top/bottom edges never show bare ground
 
 function inRiver(x, z, buffer){
