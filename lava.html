@@ -248,7 +248,7 @@ const lavaMaterial = new THREE.ShaderMaterial({
       vec3 crustColor = vec3(0.185,0.0088,0.0048);
 
       vec3 col = mix(darkBase, midBase, n1);
-      col = mix(col, brightVein, veins*0.32);
+      col = mix(col, brightVein, veins*0.22);
       col = mix(col, crustColor, clamp(crust,0.0,1.0)*0.75);
 
       float c = abs(vUv.x-0.5)*2.0;
@@ -396,6 +396,8 @@ scatterTier(1.30, 0.16, 0.50, 1.15, 0.62); // large
 scatterTier(0.62, 0.12, 0.30, 0.52, 0.68); // medium
 // left-edge filler — closes remaining bare-ground gaps along the visible left bank
 scatterTier(0.30, 0.03, 0.14, 0.26, 0.48, -HW*1.5, -HW*0.15, -ORTHO_H*1.3, ORTHO_H*1.3);
+// left-edge lower-half filler — extra density where gaps were most persistent
+scatterTier(0.20, 0.02, 0.10, 0.20, 0.40, -HW*1.5, -HW*0.1, 0, ORTHO_H*1.3);
 // right-bottom filler — smaller rocks tucked between the large ones so that
 // area reads with as much shape variety as the rest of the field
 scatterTier(0.28, 0.03, 0.14, 0.24, 0.46, HW*0.15, HW*1.5, ORTHO_H*0.15, ORTHO_H*1.3);
