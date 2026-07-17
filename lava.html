@@ -336,7 +336,7 @@ boulderMaterial.onBeforeCompile = (shader) => {
 // later pass fills the gaps the previous pass left, so the banks read as
 // dense packed rock rather than pebbles scattered on black ground.
 const boulderDefs = [];
-const BOUNDS_X = HW * 5.6;
+const BOUNDS_X = HW * 7.2;
 const BOULDER_Z_MARGIN = ORTHO_H * 1.2; // extra reach past the river's ends so far top/bottom edges never show bare ground
 
 function inRiver(x, z, buffer){
@@ -390,9 +390,8 @@ function scatterTier(cell, riverBuffer, radiusMin, radiusMax, packFactor){
   }
 }
 
-scatterTier(1.30, 0.12, 0.50, 1.15, 0.62); // large, chunky anchor rocks
-scatterTier(0.62, 0.06, 0.30, 0.52, 0.68); // medium, fills the bigger gaps
-scatterTier(0.36, 0.02, 0.16, 0.30, 0.50); // small filler, closes remaining pinholes of bare ground
+scatterTier(1.30, 0.16, 0.50, 1.15, 0.62); // large
+scatterTier(0.62, 0.12, 0.30, 0.52, 0.68); // medium
 
 const boulderMesh = new THREE.InstancedMesh(boulderGeo, boulderMaterial, boulderDefs.length);
 const heatArray = new Float32Array(boulderDefs.length);
