@@ -241,9 +241,9 @@ const lavaMaterial = new THREE.ShaderMaterial({
 
       float veins = smoothstep(0.56, 0.80, n1*0.6 + n2*0.4);
 
-      vec3 darkBase   = vec3(0.336,0.0144,0.008);
-      vec3 midBase    = vec3(0.37,0.019,0.0095);
-      vec3 brightVein = vec3(0.36,0.11,0.034);
+      vec3 darkBase   = vec3(0.36,0.016,0.009);
+      vec3 midBase    = vec3(0.52,0.028,0.014);
+      vec3 brightVein = vec3(0.58,0.15,0.045);
       vec3 crustColor = vec3(0.185,0.0088,0.0048);
 
       vec3 col = mix(darkBase, midBase, n1);
@@ -626,11 +626,11 @@ function makeBubbleMaterial(){
         float rim = pow(1.0 - clamp(vN.y, 0.0, 1.0), 1.6);
         vec3 linearColor = mix(uCenter, uRim, rim);
         // this material bypasses the standard material chunks, so it needs
-        // its own brightness boost or it renders far too dark and blends
-        // into the lava — a uniform multiplier (not a pow curve) keeps the
-        // R:G:B ratio intact so the bubble stays dark crimson instead of
-        // washing out toward gray/white.
-        gl_FragColor = vec4(clamp(linearColor * 2.3, 0.0, 1.0), 1.0);
+        // its own brightness boost or it renders far too dark (near-black)
+        // and blends into the lava — a uniform multiplier (not a pow curve)
+        // keeps the R:G:B ratio intact so the bubble stays dark crimson
+        // instead of washing out toward gray/white.
+        gl_FragColor = vec4(clamp(linearColor * 4.8, 0.0, 1.0), 1.0);
       }
     `,
   });
