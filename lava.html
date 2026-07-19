@@ -146,7 +146,7 @@ scene.add(rimLight);
 
 // ── River path shape (centerline + width, in world units) ───────────────────
 const HW = camera.right;                      // half visible width at startup
-const BOUNDS_X = HW * 7.2 + 9;                 // boulder field half-width — comfortably past the visible edges on both sides
+const BOUNDS_X = HW * 7.2 + 13;                // boulder field half-width — comfortably past the visible edges on both sides
 const baseHalfWidth = HW * 0.50;
 const widthVar      = HW * 0.035;
 const ampA = HW * 0.22, ampB = HW * 0.09;
@@ -262,7 +262,7 @@ const lavaMaterial = new THREE.ShaderMaterial({
 
       // absolute brightness floor — the darkest parts of the flow must never
       // read as near-black, regardless of bank/crust darkening.
-      col.r = max(col.r, 0.333);
+      col.r = max(col.r, 0.22);
 
       gl_FragColor = vec4(col, 1.0);
     }
@@ -394,13 +394,6 @@ function scatterTier(cell, riverBuffer, radiusMin, radiusMax, packFactor, xMin, 
 
 scatterTier(1.30, 0.16, 0.50, 1.15, 0.62); // large
 scatterTier(0.62, 0.12, 0.30, 0.52, 0.68); // medium
-// left-edge filler — closes remaining bare-ground gaps along the visible left bank
-scatterTier(0.30, 0.03, 0.14, 0.26, 0.48, -HW*1.5, -HW*0.15, -ORTHO_H*1.3, ORTHO_H*1.3);
-// left-edge lower-half filler — extra density where gaps were most persistent
-scatterTier(0.20, 0.02, 0.10, 0.20, 0.40, -HW*1.5, -HW*0.1, 0, ORTHO_H*1.3);
-// right-bottom filler — smaller rocks tucked between the large ones so that
-// area reads with as much shape variety as the rest of the field
-scatterTier(0.28, 0.03, 0.14, 0.24, 0.46, HW*0.15, HW*1.5, ORTHO_H*0.15, ORTHO_H*1.3);
 
 const boulderMesh = new THREE.InstancedMesh(boulderGeo, boulderMaterial, boulderDefs.length);
 const heatArray = new Float32Array(boulderDefs.length);
