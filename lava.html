@@ -477,8 +477,8 @@ function buildCrackGeometry(seed, boulderRadius){
       const d0 = pts[s].d / maxReach, d1 = pts[s+1].d / maxReach;
       const dir = new THREE.Vector2().subVectors(p1,p0).normalize();
       const nrm = new THREE.Vector2(-dir.y, dir.x);
-      const w0 = 0.05 * (1 - s / pts.length * 0.3);
-      const w1 = 0.05 * (1 - (s+1) / pts.length * 0.3);
+      const w0 = 0.03 * (1 - s / pts.length * 0.3);
+      const w1 = 0.03 * (1 - (s+1) / pts.length * 0.3);
       const base = vOff;
       positions.push(
         p0.x+nrm.x*w0, 0, p0.y+nrm.y*w0,
@@ -528,7 +528,7 @@ const bakedCracks = boulderDefs.map((def, i) => {
 
   const mesh = new THREE.Mesh(crackGeo, makeCrackFillMaterial());
   mesh.position.set(def.x, def.y + def.radius * 0.98, def.z);
-  mesh.renderOrder = 5;
+  mesh.renderOrder = -1;
   scene.add(mesh);
 
   return { mesh };
