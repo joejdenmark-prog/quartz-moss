@@ -456,7 +456,7 @@ function buildCrackGeometry(seed, boulderRadius){
   let maxReach = 0.0001;
   for (let i = 0; i < branches; i++) {
     const ang = (i/branches)*Math.PI*2 + crand(-0.8, 0.8);
-    const len = boulderRadius * crand(0.3, 0.6);
+    const len = boulderRadius * crand(0.5, 0.85);
     const segs = 5 + Math.floor(crand(0, 3));
     const pts = [{ p: new THREE.Vector2(0,0), d: 0 }];
     let cx = 0, cy = 0, a = ang, cumLen = 0;
