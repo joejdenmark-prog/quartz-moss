@@ -456,12 +456,12 @@ function buildCrackGeometry(seed, boulderRadius){
   let maxReach = 0.0001;
   for (let i = 0; i < branches; i++) {
     const ang = (i/branches)*Math.PI*2 + crand(-0.8, 0.8);
-    const len = boulderRadius * crand(0.9, 1.5);
+    const len = boulderRadius * crand(0.3, 0.6);
     const segs = 5 + Math.floor(crand(0, 3));
     const pts = [{ p: new THREE.Vector2(0,0), d: 0 }];
     let cx = 0, cy = 0, a = ang, cumLen = 0;
     for (let s = 0; s < segs; s++) {
-      a += crand(-1.1, 1.1);
+      a += crand(-0.5, 0.5);
       const stepLen = len/segs;
       cx += Math.cos(a)*stepLen;
       cy += Math.sin(a)*stepLen;
