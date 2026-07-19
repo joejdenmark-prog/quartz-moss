@@ -146,7 +146,7 @@ scene.add(rimLight);
 
 // ── River path shape (centerline + width, in world units) ───────────────────
 const HW = camera.right;                      // half visible width at startup
-const BOUNDS_X = HW * 7.2 + 7;                 // boulder field half-width — comfortably past the visible edges on both sides
+const BOUNDS_X = HW * 7.2 + 9;                 // boulder field half-width — comfortably past the visible edges on both sides
 const baseHalfWidth = HW * 0.50;
 const widthVar      = HW * 0.035;
 const ampA = HW * 0.22, ampB = HW * 0.09;
@@ -238,7 +238,7 @@ const lavaMaterial = new THREE.ShaderMaterial({
 
       // thin dark solidified-crust veins threaded through the flow
       float crustN = fbm(vUv*vec2(9.5,23.0) + warp*1.6 + vec2(uTime*0.010, -uTime*0.045));
-      float crust = smoothstep(0.36,0.5,crustN) - smoothstep(0.5,0.64,crustN);
+      float crust = smoothstep(0.40,0.5,crustN) - smoothstep(0.5,0.60,crustN);
 
       float veins = smoothstep(0.56, 0.80, n1*0.6 + n2*0.4);
 
