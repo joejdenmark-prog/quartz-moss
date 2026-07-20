@@ -287,53 +287,11 @@ groundMesh.position.y = -0.03;
 scene.add(groundMesh);
 
 // ── Boulders (dense instanced field along the river banks) ──────────────────
-const boulderGeo = new THREE.DodecahedronGeometry(1, 0);
-{
-  // Break the perfect polyhedral symmetry once, per-vertex, so every boulder
-  // (rotated/scaled per instance) reads as an irregular chunk of rock rather
-  // than a smooth, regular solid — flat faces stay flat, just uneven.
-  const jrng = mulberry32(0x9e3b7a);
-  const pos = boulderGeo.attributes.position;
-  for (let i = 0; i < pos.count; i++) {
-    const jitter = 1 + (jrng() - 0.5) * 0.34;
-    pos.setXYZ(i, pos.getX(i)*jitter, pos.getY(i)*jitter, pos.getZ(i)*jitter);
-  }
-  pos.needsUpdate = true;
-  boulderGeo.computeVertexNormals();
-}
-const boulderMaterial = new THREE.MeshStandardMaterial({
-  color: 0xffffff, roughness: 0.98, metalness: 0.0, flatShading: true,
-});
-boulderMaterial.emissive = new THREE.Color(0x000000);
-boulderMaterial.emissiveIntensity = 0;
-boulderMaterial.onBeforeCompile = (shader) => {
-  shader.vertexShader = shader.vertexShader
-    .replace('#include <common>', `#include <common>
-      attribute float aHeat;
-      attribute float aRiverGlow;
-      attribute float aRiverSide;
-      varying float vHeat;
-      varying float vRiverGlow;
-      varying float vRiverFacing;`)
-    .replace('#include <begin_vertex>', `#include <begin_vertex>
-      vHeat = aHeat;
-      vRiverGlow = aRiverGlow;
-      vec3 outwardDir = normalize(mat3(instanceMatrix) * normalize(position));
-      vRiverFacing = max(0.0, outwardDir.x * aRiverSide);`);
-  shader.fragmentShader = shader.fragmentShader
-    .replace('#include <common>', '#include <common>\nvarying float vHeat;\nvarying float vRiverGlow;\nvarying float vRiverFacing;')
-    .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
-      float h = clamp(vHeat, 0.0, 1.0);
-      vec3 riverGlowColor = vec3(0.48,0.055,0.03);
-      totalEmissiveRadiance += riverGlowColor * vRiverGlow * vRiverFacing * 0.425;
-      // baseline visibility floor — without this, this dark an albedo gets
-      // crushed to pure black by the tone curve tuned for the bright lava.
-      totalEmissiveRadiance += vec3(0.028, 0.020, 0.016);`);
-};
-
-// Multi-tier scatter: large boulders first, then medium, then small — each
-// later pass fills the gaps the previous pass left, so the banks read as
-// dense packed rock rather than pebbles scattered on black ground.
+// Multi-tier scatter: large boulders first, then medium — each later pass
+// fills the gaps the previous pass left, so the banks read as dense packed
+// rock rather than pebbles scattered on black ground. Positions must exist
+// before texture generation below, since visible-boulder textures are keyed
+// off each boulder's final (x,z).
 const boulderDefs = [];
 const BOULDER_Z_MARGIN = ORTHO_H * 1.2; // extra reach past the river's ends so far top/bottom edges never show bare ground
 
@@ -395,20 +353,281 @@ function scatterTier(cell, riverBuffer, radiusMin, radiusMax, packFactor, xMin, 
 scatterTier(1.30, 0.16, 0.75, 1.45, 0.62); // large
 scatterTier(0.62, 0.12, 0.45, 0.75, 0.68); // medium
 
+// ── Boulder shape — heavily-jittered low-poly sphere reads as an irregular
+// lumpy rock rather than a faceted polyhedron; normals stay smooth
+// (flatShading: false) so the surface texture (not hard facet edges) carries
+// the detail.
+const boulderGeo = new THREE.SphereGeometry(1, 7, 6);
+{
+  const jrng = mulberry32(0x9e3b7a);
+  const pos = boulderGeo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const jitter = 1 + (jrng() - 0.5) * 0.70; // +/-35%
+    pos.setXYZ(i, pos.getX(i)*jitter, pos.getY(i)*jitter, pos.getZ(i)*jitter);
+  }
+  pos.needsUpdate = true;
+  boulderGeo.computeVertexNormals();
+}
+
+// ── Boulder surface + crack texture atlas ────────────────────────────────────
+// Each boulder inside the visible viewport gets a unique baked texture
+// (porous rock surface + carved crack grooves); every boulder outside it
+// shares one generic texture, since it's never seen closely enough to need
+// individual detail. All of these are packed into a single shared atlas so
+// every boulder — visible or not — stays in the one InstancedMesh; tap/crack
+// raycasting keeps working off plain instanceId, exactly as before.
+const CRACK_SEED_SALT = 7919;
+
+// Same seeded random-walk branch generator feeds both the baked groove
+// texture and the separate glow texture, so their crack patterns line up
+// pixel-for-pixel.
+function generateCrackPaths(seed){
+  const crng = mulberry32(seed >>> 0);
+  const crand = (a,b) => a + crng()*(b-a);
+  const branches = 3 + Math.floor(crand(0, 3)); // 3-5 branches
+  const branchPts = [];
+  let maxReach = 0.0001;
+  for (let i = 0; i < branches; i++) {
+    const ang = (i/branches)*Math.PI*2 + crand(-0.8, 0.8);
+    const len = crand(0.32, 0.55);
+    const segs = 5 + Math.floor(crand(0, 3));
+    // some branches curve gently (organic), others jitter hard (angular) —
+    // which kind a branch is comes from the seed, not chance per-frame.
+    const jitter = crng() < 0.5 ? crand(0.15, 0.35) : crand(0.55, 1.0);
+    const pts = [{ x: 0, y: 0, d: 0 }];
+    let cx = 0, cy = 0, a = ang, cumLen = 0;
+    for (let s = 0; s < segs; s++) {
+      a += crand(-jitter, jitter);
+      const stepLen = len/segs;
+      cx += Math.cos(a)*stepLen;
+      cy += Math.sin(a)*stepLen;
+      cumLen += stepLen;
+      pts.push({ x: cx, y: cy, d: cumLen });
+    }
+    maxReach = Math.max(maxReach, cumLen);
+    branchPts.push(pts);
+  }
+  for (const pts of branchPts) for (const p of pts) p.d /= maxReach; // normalize distance-along-branch to 0..1
+  return branchPts;
+}
+
+function makeBoulderTexture(seed, isVisible){
+  const size = 256;
+  const cnv = document.createElement('canvas');
+  cnv.width = cnv.height = size;
+  const ctx = cnv.getContext('2d');
+  const trng = mulberry32(seed >>> 0);
+
+  ctx.fillStyle = '#0a0908';
+  ctx.fillRect(0, 0, size, size);
+
+  // porous surface: scattered tiny dark pits
+  const pitCount = 200 + Math.floor(trng()*200);
+  const pitColors = ['#060504','#0a0807','#0d0b09','#111009','#151210'];
+  for (let i = 0; i < pitCount; i++) {
+    const x = trng()*size, y = trng()*size, r = 1 + trng()*3;
+    ctx.fillStyle = pitColors[Math.floor(trng()*pitColors.length)];
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
+  }
+  // subtle lighter patches catching light
+  const patchCount = 15 + Math.floor(trng()*15);
+  for (let i = 0; i < patchCount; i++) {
+    const x = trng()*size, y = trng()*size, r = 6 + trng()*16;
+    ctx.fillStyle = 'rgba(20,18,16,' + (0.25 + trng()*0.3).toFixed(2) + ')';
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
+  }
+
+  if (isVisible) {
+    const paths = generateCrackPaths(seed ^ 0x51ed270b);
+    const cx = size/2, cy = size/2, scale = size*0.42;
+    for (const pts of paths) {
+      // wide warm halo underneath, then a thin dark groove on top — reads
+      // as a carved crack with a bit of depth rather than a flat line.
+      ctx.strokeStyle = '#1a0500';
+      ctx.lineWidth = 9; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(cx + pts[0].x*scale, cy + pts[0].y*scale);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(cx + pts[i].x*scale, cy + pts[i].y*scale);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#020101';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(cx + pts[0].x*scale, cy + pts[0].y*scale);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(cx + pts[i].x*scale, cy + pts[i].y*scale);
+      ctx.stroke();
+    }
+  }
+
+  const tex = new THREE.CanvasTexture(cnv);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function makeCrackGlowTexture(seed){
+  const size = 256;
+  const cx = size/2, cy = size/2, scale = size*0.42;
+  const paths = generateCrackPaths(seed ^ 0x51ed270b); // same transform as the groove pass above, so patterns match exactly
+
+  // RGB is baked on one canvas, and normalized distance-from-origin (for the
+  // tap fill-reveal) is baked as grayscale on a second — then merged so the
+  // final texture's alpha channel carries distance instead of transparency.
+  const colorCnv = document.createElement('canvas'); colorCnv.width = colorCnv.height = size;
+  const colorCtx = colorCnv.getContext('2d');
+  const distCnv = document.createElement('canvas'); distCnv.width = distCnv.height = size;
+  const distCtx = distCnv.getContext('2d');
+
+  const c0 = [0xcc,0x22,0x00], c1 = [0xff,0x44,0x00];
+  for (const pts of paths) {
+    for (let i = 1; i < pts.length; i++) {
+      const p0 = pts[i-1], p1 = pts[i];
+      const dAvg = (p0.d + p1.d) * 0.5;
+      const r = Math.round(c0[0] + (c1[0]-c0[0])*dAvg);
+      const g = Math.round(c0[1] + (c1[1]-c0[1])*dAvg);
+      const b = Math.round(c0[2] + (c1[2]-c0[2])*dAvg);
+      colorCtx.strokeStyle = `rgb(${r},${g},${b})`;
+      colorCtx.lineWidth = 4; colorCtx.lineCap = 'round'; colorCtx.lineJoin = 'round';
+      colorCtx.beginPath();
+      colorCtx.moveTo(cx + p0.x*scale, cy + p0.y*scale);
+      colorCtx.lineTo(cx + p1.x*scale, cy + p1.y*scale);
+      colorCtx.stroke();
+
+      const distByte = Math.max(1, Math.round(dAvg*255));
+      distCtx.strokeStyle = `rgb(${distByte},${distByte},${distByte})`;
+      distCtx.lineWidth = 4; distCtx.lineCap = 'round'; distCtx.lineJoin = 'round';
+      distCtx.beginPath();
+      distCtx.moveTo(cx + p0.x*scale, cy + p0.y*scale);
+      distCtx.lineTo(cx + p1.x*scale, cy + p1.y*scale);
+      distCtx.stroke();
+    }
+  }
+
+  const colorData = colorCtx.getImageData(0, 0, size, size);
+  const distData = distCtx.getImageData(0, 0, size, size);
+  const out = colorCtx.createImageData(size, size);
+  for (let i = 0; i < size*size; i++) {
+    const o = i*4;
+    const hasCrack = distData.data[o+3] > 0;
+    out.data[o]   = colorData.data[o];
+    out.data[o+1] = colorData.data[o+1];
+    out.data[o+2] = colorData.data[o+2];
+    out.data[o+3] = hasCrack ? distData.data[o] : 0;
+  }
+  const outCnv = document.createElement('canvas'); outCnv.width = outCnv.height = size;
+  outCnv.getContext('2d').putImageData(out, 0, 0);
+
+  const tex = new THREE.CanvasTexture(outCnv);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+const VISIBLE_X = 4.62;
+const visibleBoulderIdx = [];
+boulderDefs.forEach((b, i) => { if (Math.abs(b.x) <= VISIBLE_X && Math.abs(b.z) <= ORTHO_H) visibleBoulderIdx.push(i); });
+
+const ATLAS_CELL = 256;
+const atlasCols = Math.max(1, Math.ceil(Math.sqrt(visibleBoulderIdx.length + 1)));
+const atlasRows = Math.max(1, Math.ceil((visibleBoulderIdx.length + 1) / atlasCols));
+const atlasCanvas = document.createElement('canvas');
+atlasCanvas.width = atlasCols * ATLAS_CELL; atlasCanvas.height = atlasRows * ATLAS_CELL;
+const atlasCtx = atlasCanvas.getContext('2d');
+const glowAtlasCanvas = document.createElement('canvas');
+glowAtlasCanvas.width = atlasCols * ATLAS_CELL; glowAtlasCanvas.height = atlasRows * ATLAS_CELL;
+const glowAtlasCtx = glowAtlasCanvas.getContext('2d');
+
+const atlasOffsetArray = new Float32Array(boulderDefs.length * 2); // defaults to (0,0) — cell 0, the shared generic texture
+const cellUvW = 1 / atlasCols, cellUvH = 1 / atlasRows;
+
+// cell 0 — shared generic texture for every boulder outside the viewport
+atlasCtx.drawImage(makeBoulderTexture(0x2c3e50, false).image, 0, 0);
+
+visibleBoulderIdx.forEach((idx, n) => {
+  const cellIndex = n + 1; // cell 0 is reserved for the shared generic texture
+  const col = cellIndex % atlasCols, row = Math.floor(cellIndex / atlasCols);
+  const seed = idx * CRACK_SEED_SALT + 13;
+  atlasCtx.drawImage(makeBoulderTexture(seed, true).image, col*ATLAS_CELL, row*ATLAS_CELL);
+  glowAtlasCtx.drawImage(makeCrackGlowTexture(seed).image, col*ATLAS_CELL, row*ATLAS_CELL);
+  atlasOffsetArray[idx*2] = col * cellUvW;
+  atlasOffsetArray[idx*2+1] = row * cellUvH;
+});
+
+const boulderAtlasTex = new THREE.CanvasTexture(atlasCanvas);
+boulderAtlasTex.needsUpdate = true;
+const crackGlowAtlasTex = new THREE.CanvasTexture(glowAtlasCanvas);
+crackGlowAtlasTex.needsUpdate = true;
+
+const boulderMaterial = new THREE.MeshStandardMaterial({
+  roughness: 0.98, metalness: 0.0, flatShading: false,
+});
+boulderMaterial.emissive = new THREE.Color(0x000000);
+boulderMaterial.emissiveIntensity = 0;
+boulderMaterial.onBeforeCompile = (shader) => {
+  // material.map deliberately isn't used here — three's built-in map sampling
+  // relies on its own internal vMapUv/MAP_UV machinery, which isn't a stable
+  // thing to hook into from outside. Both atlas textures are sampled here
+  // manually instead, against a self-contained varying (vAtlasUv) computed
+  // from a custom attribute, so nothing depends on three's internal naming.
+  shader.uniforms.uBoulderAtlas = { value: boulderAtlasTex };
+  shader.uniforms.uCrackGlowAtlas = { value: crackGlowAtlasTex };
+  shader.uniforms.uAtlasCellUv = { value: new THREE.Vector2(cellUvW, cellUvH) };
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', `#include <common>
+      attribute float aHeat;
+      attribute float aRiverGlow;
+      attribute float aRiverSide;
+      attribute vec2 aAtlasOffset;
+      attribute float aFillLevel;
+      attribute vec2 aLocalUv;
+      uniform vec2 uAtlasCellUv;
+      varying vec2 vAtlasUv;
+      varying float vHeat;
+      varying float vRiverGlow;
+      varying float vRiverFacing;
+      varying float vFillLevel;`)
+    .replace('#include <begin_vertex>', `#include <begin_vertex>
+      vHeat = aHeat;
+      vRiverGlow = aRiverGlow;
+      vFillLevel = aFillLevel;
+      vAtlasUv = aAtlasOffset + aLocalUv * uAtlasCellUv;
+      vec3 outwardDir = normalize(mat3(instanceMatrix) * normalize(position));
+      vRiverFacing = max(0.0, outwardDir.x * aRiverSide);`);
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', `#include <common>
+      uniform sampler2D uBoulderAtlas;
+      uniform sampler2D uCrackGlowAtlas;
+      varying vec2 vAtlasUv;
+      varying float vHeat;
+      varying float vRiverGlow;
+      varying float vRiverFacing;
+      varying float vFillLevel;`)
+    .replace('#include <color_fragment>', `#include <color_fragment>
+      // sampled manually (see note above), so the sRGB->linear decode that
+      // three's automatic map pipeline would normally apply has to happen
+      // here by hand, or the baked texture reads too dark/flat. This is the
+      // same piecewise curve three.js itself uses (a plain pow(2.2) over-
+      // darkens the low end and crushes the texture's low-contrast detail).
+      vec3 texRaw = texture2D(uBoulderAtlas, vAtlasUv).rgb;
+      vec3 texLinear = mix(texRaw * 0.0773993808, pow(texRaw * 0.9478672986 + 0.0521327014, vec3(2.4)), step(vec3(0.04045), texRaw));
+      diffuseColor.rgb = texLinear;`)
+    .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+      float h = clamp(vHeat, 0.0, 1.0);
+      vec3 riverGlowColor = vec3(0.48,0.055,0.03);
+      totalEmissiveRadiance += riverGlowColor * vRiverGlow * vRiverFacing * 0.425;
+      // baseline visibility floor — without this, this dark an albedo gets
+      // crushed to pure black by the tone curve tuned for the bright lava.
+      totalEmissiveRadiance += vec3(0.028, 0.020, 0.016);
+      vec4 crackGlow = texture2D(uCrackGlowAtlas, vAtlasUv);
+      float crackShow = step(0.0002, crackGlow.a) * step(crackGlow.a, vFillLevel);
+      totalEmissiveRadiance += crackGlow.rgb * crackShow;`);
+};
+
 const boulderMesh = new THREE.InstancedMesh(boulderGeo, boulderMaterial, boulderDefs.length);
 const heatArray = new Float32Array(boulderDefs.length);
 const riverGlowArray = new Float32Array(boulderDefs.length);
 const riverSideArray = new Float32Array(boulderDefs.length);
+const fillLevelArray = new Float32Array(boulderDefs.length);
 {
   const dummy = new THREE.Object3D();
-  const col = new THREE.Color();
-  const rockPalette = [
-    new THREE.Color(0x050504), // near black
-    new THREE.Color(0x1a1208), // very dark warm brown
-    new THREE.Color(0x0d0d0e), // cool dark charcoal
-    new THREE.Color(0x120e0a), // dark brown-black
-    new THREE.Color(0x080a08), // dark green-black
-  ];
   boulderDefs.forEach((b, i) => {
     const sy = b.radius * range(0.55, 0.8);
     const sx = b.radius * range(0.9, 1.1);
@@ -420,10 +639,6 @@ const riverSideArray = new Float32Array(boulderDefs.length);
     dummy.scale.set(sx, sy, sz);
     dummy.updateMatrix();
     boulderMesh.setMatrixAt(i, dummy.matrix);
-    const pa = rockPalette[Math.floor(range(0, 5))];
-    const pb = rockPalette[Math.floor(range(0, 5))];
-    col.copy(pa).lerp(pb, range(0, 1));
-    boulderMesh.setColorAt(i, col);
 
     // Ambient heat-radiating glow for boulders sitting right at the bank —
     // faint and static, distinct from the interactive tap/hold warmth above.
@@ -433,117 +648,22 @@ const riverSideArray = new Float32Array(boulderDefs.length);
     riverSideArray[i] = (cx - b.x) >= 0 ? 1 : -1;
   });
 }
-boulderMesh.instanceColor.needsUpdate = true;
+boulderGeo.setAttribute('aLocalUv', boulderGeo.attributes.uv);
 boulderGeo.setAttribute('aHeat', new THREE.InstancedBufferAttribute(heatArray, 1));
 boulderGeo.setAttribute('aRiverGlow', new THREE.InstancedBufferAttribute(riverGlowArray, 1));
 boulderGeo.setAttribute('aRiverSide', new THREE.InstancedBufferAttribute(riverSideArray, 1));
+boulderGeo.setAttribute('aAtlasOffset', new THREE.InstancedBufferAttribute(atlasOffsetArray, 2));
+boulderGeo.setAttribute('aFillLevel', new THREE.InstancedBufferAttribute(fillLevelArray, 1));
 scene.add(boulderMesh);
 
-// ── Baked crack decals — one permanent groove mesh per boulder, generated
-// once at startup. Each has a dark shadow layer underneath (always visible,
-// simulating a carved groove) and a thin lava-fill mesh on top whose
-// uFillLevel uniform sweeps outward from the crack's origin on tap, like
-// molten lava surging out through the fracture.
-const BAKED_CRACK_REST = 0;
-
-function buildCrackGeometry(seed, boulderRadius){
-  const crng = mulberry32(seed >>> 0);
-  const crand = (a,b) => a + crng()*(b-a);
-  const branches = 3 + Math.floor(crand(0, 2));
-  const positions = [], idx = [], dists = [];
-  let vOff = 0;
-  const branchPts = [];
-  let maxReach = 0.0001;
-  for (let i = 0; i < branches; i++) {
-    const ang = (i/branches)*Math.PI*2 + crand(-0.8, 0.8);
-    const len = boulderRadius * crand(0.5, 0.85);
-    const segs = 5 + Math.floor(crand(0, 3));
-    const pts = [{ p: new THREE.Vector2(0,0), d: 0 }];
-    let cx = 0, cy = 0, a = ang, cumLen = 0;
-    for (let s = 0; s < segs; s++) {
-      a += crand(-0.5, 0.5);
-      const stepLen = len/segs;
-      cx += Math.cos(a)*stepLen;
-      cy += Math.sin(a)*stepLen;
-      cumLen += stepLen;
-      pts.push({ p: new THREE.Vector2(cx,cy), d: cumLen });
-    }
-    maxReach = Math.max(maxReach, cumLen);
-    branchPts.push(pts);
-  }
-  for (const pts of branchPts) {
-    for (let s = 0; s < pts.length-1; s++) {
-      const p0 = pts[s].p, p1 = pts[s+1].p;
-      const d0 = pts[s].d / maxReach, d1 = pts[s+1].d / maxReach;
-      const dir = new THREE.Vector2().subVectors(p1,p0).normalize();
-      const nrm = new THREE.Vector2(-dir.y, dir.x);
-      const w0 = 0.03 * (1 - s / pts.length * 0.3);
-      const w1 = 0.03 * (1 - (s+1) / pts.length * 0.3);
-      const base = vOff;
-      positions.push(
-        p0.x+nrm.x*w0, 0, p0.y+nrm.y*w0,
-        p0.x-nrm.x*w0, 0, p0.y-nrm.y*w0,
-        p1.x+nrm.x*w1, 0, p1.y+nrm.y*w1,
-        p1.x-nrm.x*w1, 0, p1.y-nrm.y*w1,
-      );
-      dists.push(d0, d0, d1, d1);
-      idx.push(base, base+2, base+1,  base+1, base+2, base+3);
-      vOff += 4;
-    }
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geo.setAttribute('aDist', new THREE.Float32BufferAttribute(dists, 1));
-  geo.setIndex(idx);
-  return geo;
-}
-
-function makeCrackFillMaterial(){
-  return new THREE.ShaderMaterial({
-    uniforms: { uFillLevel: { value: BAKED_CRACK_REST }, uColor: { value: new THREE.Color(0x8b0000) } },
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-    vertexShader: `
-      attribute float aDist;
-      varying float vDist;
-      void main(){
-        vDist = aDist;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: `
-      precision mediump float;
-      varying float vDist;
-      uniform float uFillLevel;
-      uniform vec3 uColor;
-      void main(){
-        if (vDist > uFillLevel) discard;
-        gl_FragColor = vec4(uColor, 1.0);
-      }
-    `,
-  });
-}
-
-const bakedCracks = boulderDefs.map((def, i) => {
-  const crackGeo = buildCrackGeometry(i * 7919 + 13, def.radius);
-
-  const mesh = new THREE.Mesh(crackGeo, makeCrackFillMaterial());
-  mesh.position.set(def.x, def.y + def.radius * 0.98, def.z);
-  mesh.renderOrder = -1;
-  scene.add(mesh);
-
-  return { mesh };
-});
-
-// ── Boulder crack system — baked decals fill with lava on tap ───────────────
+// ── Boulder crack system — per-instance fill level sweeps outward from the
+// tapped point through the baked crack-glow atlas, like molten lava surging
+// out through the fracture. Timing/trigger logic is unchanged from before —
+// only the render target changed (a per-instance attribute instead of a
+// per-mesh uniform), since all boulders now share one InstancedMesh.
 const activeCracks = [];   // { id, startTime }
 const HEAT_DECAY = 0.16;
-
-function disposeGroup(group){
-  group.traverse(o => {
-    if (o.geometry) o.geometry.dispose();
-    if (o.material) o.material.dispose();
-  });
-}
+const FILL_REST = 0;
 
 function triggerCrack(id, hitPoint){
   const existing = activeCracks.find(c => c.id === id);
@@ -553,7 +673,8 @@ function triggerCrack(id, hitPoint){
     activeCracks.push({ id, startTime: performance.now() });
     if (activeCracks.length > 36) {
       const old = activeCracks.shift();
-      bakedCracks[old.id].mesh.material.uniforms.uFillLevel.value = BAKED_CRACK_REST;
+      fillLevelArray[old.id] = FILL_REST;
+      boulderGeo.attributes.aFillLevel.needsUpdate = true;
     }
   }
   heatArray[id] = 1.0;
@@ -573,13 +694,14 @@ function updateBoulderHeat(dt){
   }
   if (changed) boulderGeo.attributes.aHeat.needsUpdate = true;
   const now = performance.now();
+  let fillChanged = false;
   for (let i = activeCracks.length - 1; i >= 0; i--) {
     const c = activeCracks[i];
     const elapsed = (now - c.startTime) / 1000;
     const fillDur  = 1.5;
     const holdDur  = 1.0;
     const drainDur = 4.0;
-    let level = BAKED_CRACK_REST;
+    let level = FILL_REST;
     if (elapsed < fillDur) {
       level = elapsed / fillDur;
     } else if (elapsed < fillDur + holdDur) {
@@ -587,12 +709,15 @@ function updateBoulderHeat(dt){
     } else if (elapsed < fillDur + holdDur + drainDur) {
       level = 1.0 - (elapsed - fillDur - holdDur) / drainDur;
     } else {
-      bakedCracks[c.id].mesh.material.uniforms.uFillLevel.value = BAKED_CRACK_REST;
+      fillLevelArray[c.id] = FILL_REST;
+      fillChanged = true;
       activeCracks.splice(i, 1);
       continue;
     }
-    bakedCracks[c.id].mesh.material.uniforms.uFillLevel.value = level;
+    fillLevelArray[c.id] = level;
+    fillChanged = true;
   }
+  if (fillChanged) boulderGeo.attributes.aFillLevel.needsUpdate = true;
 }
 
 // ── Bubbles: grow, swell, pop with splash ─────────────────────────────────────
@@ -947,7 +1072,8 @@ window.addEventListener('pointercancel', releasePointer);
 document.getElementById('reset-btn').addEventListener('click', () => {
   for (let i = 0; i < heatArray.length; i++) heatArray[i] = 0;
   boulderGeo.attributes.aHeat.needsUpdate = true;
-  for (const c of activeCracks) { bakedCracks[c.id].mesh.material.uniforms.uFillLevel.value = BAKED_CRACK_REST; }
+  for (const c of activeCracks) { fillLevelArray[c.id] = FILL_REST; }
+  boulderGeo.attributes.aFillLevel.needsUpdate = true;
   activeCracks.length = 0;
   for (const s of dragSlots) { s.active = false; s.strength = 0; s.x = 9999; s.z = 9999; s.pointerId = null; }
   for (const item of dragQuadPool) { item.life = 0; item.mesh.visible = false; item.mesh.material.opacity = 0; }
@@ -988,7 +1114,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future animation work ─────────────────────────────────
-window.__lava = { THREE, scene, camera, renderer, boulderMesh, boulderDefs, heatArray, triggerCrack, handleBoulderTap, dragSlots, dragQuadPool, activeCracks, bakedCracks };
+window.__lava = { THREE, scene, camera, renderer, boulderMesh, boulderDefs, heatArray, fillLevelArray, triggerCrack, handleBoulderTap, dragSlots, dragQuadPool, activeCracks };
 </script>
 </body>
 </html>
