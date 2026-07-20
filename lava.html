@@ -418,22 +418,22 @@ function makeBoulderTexture(seed, isVisible){
   const ctx = cnv.getContext('2d');
   const trng = mulberry32(seed >>> 0);
 
-  ctx.fillStyle = '#0a0908';
+  ctx.fillStyle = '#080706';
   ctx.fillRect(0, 0, size, size);
 
   // porous surface: scattered tiny dark pits
-  const pitCount = 200 + Math.floor(trng()*200);
-  const pitColors = ['#060504','#0a0807','#0d0b09','#111009','#151210'];
+  const pitCount = 300 + Math.floor(trng()*200);
+  const pitColors = ['#040303','#070505','#0a0807','#0c0a09','#0f0c0b'];
   for (let i = 0; i < pitCount; i++) {
-    const x = trng()*size, y = trng()*size, r = 1 + trng()*3;
+    const x = trng()*size, y = trng()*size, r = 1 + trng()*2;
     ctx.fillStyle = pitColors[Math.floor(trng()*pitColors.length)];
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
   }
-  // subtle lighter patches catching light
-  const patchCount = 15 + Math.floor(trng()*15);
-  for (let i = 0; i < patchCount; i++) {
-    const x = trng()*size, y = trng()*size, r = 6 + trng()*16;
-    ctx.fillStyle = 'rgba(20,18,16,' + (0.25 + trng()*0.3).toFixed(2) + ')';
+  // sparse highlight dots catching light
+  const highlightCount = 8 + Math.floor(trng()*8);
+  for (let i = 0; i < highlightCount; i++) {
+    const x = trng()*size, y = trng()*size, r = 1.5 + trng()*2.5;
+    ctx.fillStyle = '#1a1614';
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
   }
 
@@ -443,21 +443,29 @@ function makeBoulderTexture(seed, isVisible){
     for (const pts of paths) {
       // wide warm halo underneath, then a thin dark groove on top — reads
       // as a carved crack with a bit of depth rather than a flat line.
-      ctx.strokeStyle = '#1a0500';
-      ctx.lineWidth = 9; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.strokeStyle = 'rgba(26,5,0,0.6)';
+      ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
       ctx.beginPath();
       ctx.moveTo(cx + pts[0].x*scale, cy + pts[0].y*scale);
       for (let i = 1; i < pts.length; i++) ctx.lineTo(cx + pts[i].x*scale, cy + pts[i].y*scale);
       ctx.stroke();
 
-      ctx.strokeStyle = '#020101';
-      ctx.lineWidth = 4;
+      ctx.strokeStyle = '#010000';
+      ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(cx + pts[0].x*scale, cy + pts[0].y*scale);
       for (let i = 1; i < pts.length; i++) ctx.lineTo(cx + pts[i].x*scale, cy + pts[i].y*scale);
       ctx.stroke();
     }
   }
+
+  // dark edge vignette — the outer 20% of the canvas fades toward near-black
+  // so adjacent boulders read as separate rocks instead of blending together.
+  const vignette = ctx.createRadialGradient(size/2, size/2, size*0.4, size/2, size/2, size*0.5);
+  vignette.addColorStop(0, 'rgba(3,2,2,0)');
+  vignette.addColorStop(1, '#030202');
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, size, size);
 
   const tex = new THREE.CanvasTexture(cnv);
   tex.needsUpdate = true;
