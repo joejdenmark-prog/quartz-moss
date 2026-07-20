@@ -357,12 +357,12 @@ scatterTier(0.62, 0.12, 0.45, 0.75, 0.68); // medium
 // lumpy rock rather than a faceted polyhedron; normals stay smooth
 // (flatShading: false) so the surface texture (not hard facet edges) carries
 // the detail.
-const boulderGeo = new THREE.SphereGeometry(1, 7, 6);
+const boulderGeo = new THREE.SphereGeometry(1, 10, 8);
 {
   const jrng = mulberry32(0x9e3b7a);
   const pos = boulderGeo.attributes.position;
   for (let i = 0; i < pos.count; i++) {
-    const jitter = 1 + (jrng() - 0.5) * 0.70; // +/-35%
+    const jitter = 1 + (jrng() - 0.5) * 0.45;
     pos.setXYZ(i, pos.getX(i)*jitter, pos.getY(i)*jitter, pos.getZ(i)*jitter);
   }
   pos.needsUpdate = true;
@@ -418,22 +418,21 @@ function makeBoulderTexture(seed, isVisible){
   const ctx = cnv.getContext('2d');
   const trng = mulberry32(seed >>> 0);
 
-  ctx.fillStyle = '#080706';
+  ctx.fillStyle = '#141210';
   ctx.fillRect(0, 0, size, size);
 
   // porous surface: scattered tiny dark pits
-  const pitCount = 300 + Math.floor(trng()*200);
-  const pitColors = ['#040303','#070505','#0a0807','#0c0a09','#0f0c0b'];
+  const pitCount = 400;
   for (let i = 0; i < pitCount; i++) {
-    const x = trng()*size, y = trng()*size, r = 1 + trng()*2;
-    ctx.fillStyle = pitColors[Math.floor(trng()*pitColors.length)];
+    const x = trng()*size, y = trng()*size, r = 1 + trng()*3;
+    ctx.fillStyle = '#060403';
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
   }
-  // sparse highlight dots catching light
-  const highlightCount = 8 + Math.floor(trng()*8);
+  // highlight spots catching light
+  const highlightCount = 100;
   for (let i = 0; i < highlightCount; i++) {
-    const x = trng()*size, y = trng()*size, r = 1.5 + trng()*2.5;
-    ctx.fillStyle = '#1a1614';
+    const x = trng()*size, y = trng()*size, r = 2 + trng()*3;
+    ctx.fillStyle = '#201c18';
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
   }
 
@@ -443,8 +442,8 @@ function makeBoulderTexture(seed, isVisible){
     for (const pts of paths) {
       // wide warm halo underneath, then a thin dark groove on top — reads
       // as a carved crack with a bit of depth rather than a flat line.
-      ctx.strokeStyle = 'rgba(26,5,0,0.6)';
-      ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.strokeStyle = 'rgba(42,8,0,0.8)';
+      ctx.lineWidth = 5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
       ctx.beginPath();
       ctx.moveTo(cx + pts[0].x*scale, cy + pts[0].y*scale);
       for (let i = 1; i < pts.length; i++) ctx.lineTo(cx + pts[i].x*scale, cy + pts[i].y*scale);
@@ -623,7 +622,7 @@ boulderMaterial.onBeforeCompile = (shader) => {
       totalEmissiveRadiance += riverGlowColor * vRiverGlow * vRiverFacing * 0.425;
       // baseline visibility floor — without this, this dark an albedo gets
       // crushed to pure black by the tone curve tuned for the bright lava.
-      totalEmissiveRadiance += vec3(0.028, 0.020, 0.016);
+      totalEmissiveRadiance += vec3(0.08, 0.06, 0.05);
       vec4 crackGlow = texture2D(uCrackGlowAtlas, vAtlasUv);
       float crackShow = step(0.0002, crackGlow.a) * step(crackGlow.a, vFillLevel);
       totalEmissiveRadiance += crackGlow.rgb * crackShow;`);
