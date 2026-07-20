@@ -362,7 +362,7 @@ const boulderGeo = new THREE.SphereGeometry(1, 10, 8);
   const jrng = mulberry32(0x9e3b7a);
   const pos = boulderGeo.attributes.position;
   for (let i = 0; i < pos.count; i++) {
-    const jitter = 1 + (jrng() - 0.5) * 0.45;
+    const jitter = 1 + (jrng() - 0.5) * 0.65;
     pos.setXYZ(i, pos.getX(i)*jitter, pos.getY(i)*jitter, pos.getZ(i)*jitter);
   }
   pos.needsUpdate = true;
@@ -444,22 +444,29 @@ function makeBoulderTexture(seed, isVisible){
   const ctx = cnv.getContext('2d');
   const trng = mulberry32(seed >>> 0);
 
-  ctx.fillStyle = '#070605';
+  ctx.fillStyle = '#1a1612';
   ctx.fillRect(0, 0, size, size);
 
   // porous surface: scattered tiny dark pits
-  const pitCount = 600;
+  const pitCount = 500;
   for (let i = 0; i < pitCount; i++) {
-    const x = trng()*size, y = trng()*size, r = 1 + trng()*3;
-    ctx.fillStyle = '#020101';
+    const x = trng()*size, y = trng()*size, r = 2 + trng()*3;
+    ctx.fillStyle = '#060403';
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
   }
   // highlight spots catching light
-  const highlightCount = 60;
+  const highlightCount = 80;
   for (let i = 0; i < highlightCount; i++) {
-    const x = trng()*size, y = trng()*size, r = 2 + trng()*3;
-    ctx.fillStyle = '#0f0c09';
+    const x = trng()*size, y = trng()*size, r = 3 + trng()*4;
+    ctx.fillStyle = '#252018';
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
+  }
+  // fine noise grain simulating the micro-texture of volcanic rock
+  const noiseCount = 1000;
+  for (let i = 0; i < noiseCount; i++) {
+    const x = trng()*size, y = trng()*size;
+    ctx.fillStyle = i % 2 === 0 ? '#0d0b08' : '#201a14';
+    ctx.fillRect(x, y, 1, 1);
   }
 
   if (isVisible) {
