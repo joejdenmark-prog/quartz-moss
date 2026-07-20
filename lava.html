@@ -131,11 +131,11 @@ if (window.visualViewport) {
 }
 
 // ── Lights ────────────────────────────────────────────────────────────────────
-scene.add(new THREE.HemisphereLight(0x3a2010, 0x040201, 1.4));
+scene.add(new THREE.HemisphereLight(0x2a1408, 0x040201, 0.5));
 const sun = new THREE.DirectionalLight(0xffa070, 0.95);
 sun.position.set(-6, 14, 4);
 sun.color.set(0xffe0c0);
-sun.intensity = 1.8;
+sun.intensity = 0.5;
 scene.add(sun);
 const fillLight = new THREE.DirectionalLight(0x3a1a10, 0.20);
 fillLight.position.set(5, 8, -6);
@@ -444,21 +444,21 @@ function makeBoulderTexture(seed, isVisible){
   const ctx = cnv.getContext('2d');
   const trng = mulberry32(seed >>> 0);
 
-  ctx.fillStyle = '#0a0907';
+  ctx.fillStyle = '#070605';
   ctx.fillRect(0, 0, size, size);
 
   // porous surface: scattered tiny dark pits
-  const pitCount = 500;
+  const pitCount = 600;
   for (let i = 0; i < pitCount; i++) {
     const x = trng()*size, y = trng()*size, r = 1 + trng()*3;
-    ctx.fillStyle = '#030202';
+    ctx.fillStyle = '#020101';
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
   }
   // highlight spots catching light
-  const highlightCount = 100;
+  const highlightCount = 60;
   for (let i = 0; i < highlightCount; i++) {
     const x = trng()*size, y = trng()*size, r = 2 + trng()*3;
-    ctx.fillStyle = '#181410';
+    ctx.fillStyle = '#0f0c09';
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
   }
 
@@ -646,7 +646,7 @@ boulderMaterial.onBeforeCompile = (shader) => {
       totalEmissiveRadiance += riverGlowColor * vRiverGlow * vRiverFacing * 0.425;
       // baseline visibility floor — without this, this dark an albedo gets
       // crushed to pure black by the tone curve tuned for the bright lava.
-      totalEmissiveRadiance += vec3(0.04, 0.03, 0.025);
+      totalEmissiveRadiance += vec3(0.025, 0.018, 0.014);
       vec4 crackGlow = texture2D(uCrackGlowAtlas, vAtlasUv);
       float crackShow = step(0.0002, crackGlow.a) * step(crackGlow.a, vFillLevel);
       totalEmissiveRadiance += crackGlow.rgb * crackShow;`);
