@@ -353,11 +353,11 @@ function scatterTier(cell, riverBuffer, radiusMin, radiusMax, packFactor, xMin, 
 scatterTier(1.30, 0.16, 0.75, 1.45, 0.62); // large
 scatterTier(0.62, 0.12, 0.45, 0.75, 0.68); // medium
 
-// ── Boulder shape — heavily-jittered low-poly sphere reads as an irregular
-// lumpy rock rather than a faceted polyhedron; normals stay smooth
-// (flatShading: false) so the surface texture (not hard facet edges) carries
-// the detail.
-const boulderGeo = new THREE.SphereGeometry(1, 10, 8);
+// ── Boulder shape — heavily-jittered sphere reads as an irregular lumpy
+// rock; flat shading (see boulderMaterial below) makes each facet read as
+// its own flat plane against the texture, avoiding UV-stretch distortion
+// across curved surfaces.
+const boulderGeo = new THREE.SphereGeometry(1, 12, 9);
 {
   const jrng = mulberry32(0x9e3b7a);
   const pos = boulderGeo.attributes.position;
@@ -444,21 +444,21 @@ function makeBoulderTexture(seed, isVisible){
   const ctx = cnv.getContext('2d');
   const trng = mulberry32(seed >>> 0);
 
-  ctx.fillStyle = '#1a1612';
+  ctx.fillStyle = '#151210';
   ctx.fillRect(0, 0, size, size);
 
   // porous surface: scattered tiny dark pits
-  const pitCount = 500;
+  const pitCount = 600;
   for (let i = 0; i < pitCount; i++) {
     const x = trng()*size, y = trng()*size, r = 2 + trng()*3;
-    ctx.fillStyle = '#060403';
+    ctx.fillStyle = '#050403';
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
   }
   // highlight spots catching light
-  const highlightCount = 80;
+  const highlightCount = 100;
   for (let i = 0; i < highlightCount; i++) {
     const x = trng()*size, y = trng()*size, r = 3 + trng()*4;
-    ctx.fillStyle = '#252018';
+    ctx.fillStyle = '#221d17';
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
   }
   // fine noise grain simulating the micro-texture of volcanic rock
@@ -595,7 +595,7 @@ const crackGlowAtlasTex = new THREE.CanvasTexture(glowAtlasCanvas);
 crackGlowAtlasTex.needsUpdate = true;
 
 const boulderMaterial = new THREE.MeshStandardMaterial({
-  roughness: 0.98, metalness: 0.0, flatShading: false,
+  roughness: 0.98, metalness: 0.0, flatShading: true,
 });
 boulderMaterial.emissive = new THREE.Color(0x000000);
 boulderMaterial.emissiveIntensity = 0;
