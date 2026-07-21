@@ -2212,14 +2212,6 @@ document.getElementById('reset-btn').addEventListener('click', () => {
   renderer.shadowMap.needsUpdate = true;
 });
 
-// ── TEMP: on-screen FPS readout for mobile perf testing — remove when done ───
-const fpsEl = document.createElement('div');
-fpsEl.style.cssText = 'position:fixed;top:8px;left:8px;z-index:9999;' +
-  'font:12px/1.4 monospace;color:#9f9;background:rgba(0,0,0,0.55);' +
-  'padding:4px 8px;border-radius:4px;pointer-events:none;white-space:pre;';
-document.body.appendChild(fpsEl);
-let fpsFrames = 0, fpsAccum = 0;
-
 if (isMobile) {
   renderer.shadowMap.enabled = false;
   scene.traverse((obj) => {
@@ -2242,16 +2234,6 @@ renderer.setAnimationLoop(() => {
   updateRegrowth(dt);
   updateMossSway();
   renderer.render(scene, camera);
-
-  // TEMP FPS readout — updates ~2x/sec so the number is readable, not jittery.
-  fpsFrames++;
-  fpsAccum += dt;
-  if (fpsAccum >= 0.5) {
-    const fps = fpsFrames / fpsAccum;
-    fpsEl.textContent = `${fps.toFixed(1)} fps`;
-    fpsFrames = 0;
-    fpsAccum = 0;
-  }
 });
 
 // ── Console handles for future animation work ─────────────────────────────────
