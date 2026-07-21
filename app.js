@@ -2104,13 +2104,15 @@ function playCrystalShatter() {
 }
 
 const _gate = document.getElementById('audio-gate');
-_gate.addEventListener('touchend', function() {
+function _handleGate() {
   _buildAudio();
   _rCtx.resume();
   buildGrowBuffer();
   _gate.style.opacity = '0';
   setTimeout(() => _gate.style.display = 'none', 800);
-}, { once: true });
+}
+_gate.addEventListener('touchend', _handleGate, { once: true });
+_gate.addEventListener('click', _handleGate, { once: true });
 
 let _lastSwayMs = 0;
 renderer.domElement.addEventListener('pointermove', (e) => {
