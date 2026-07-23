@@ -458,6 +458,22 @@ function makeBoulderTexture(seed, isVisible){
   ctx.fillStyle = '#151210';
   ctx.fillRect(0, 0, size, size);
 
+  // broad tonal variation — soft overlapping blotches simulate mineral/
+  // density variation in real volcanic rock, giving the surface a layered,
+  // uneven depth instead of reading as one flat base fill before the finer
+  // pore/speckle detail below is added on top.
+  const blotchCount = 10 + Math.floor(trng()*8);
+  for (let i = 0; i < blotchCount; i++) {
+    const bx = trng()*size, by = trng()*size, r = 28 + trng()*48;
+    const dark = trng() > 0.5;
+    const rgb = dark ? '10,9,8' : '28,24,20';
+    const grad = ctx.createRadialGradient(bx, by, 0, bx, by, r);
+    grad.addColorStop(0, `rgba(${rgb},${(0.35 + trng()*0.25).toFixed(2)})`);
+    grad.addColorStop(1, `rgba(${rgb},0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI*2); ctx.fill();
+  }
+
   // porous surface: scattered tiny dark pits
   const pitCount = 600;
   for (let i = 0; i < pitCount; i++) {
