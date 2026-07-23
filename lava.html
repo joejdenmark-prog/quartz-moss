@@ -616,24 +616,41 @@ function makeCrackGlowTexture(seed, paths){
   const distCnv = document.createElement('canvas'); distCnv.width = distCnv.height = size;
   const distCtx = distCnv.getContext('2d');
 
-  const c0 = [0xcc,0x22,0x00], c1 = [0xff,0x44,0x00];
+  // deep red-orange "magma" gradient — darker/redder near the tap origin,
+  // still within the orange family (not a light/bright orange) at the tip.
+  // Drawn in three widening-to-narrowing layers (soft outer halo, mid band,
+  // bright hot core) so the baked glow itself carries bloom-like spread and
+  // a brighter center, instead of one flat-colored line.
+  const haloC0 = [0x50,0x0b,0x00], haloC1 = [0x7c,0x1a,0x00];
+  const midC0  = [0x7c,0x11,0x00], midC1  = [0xa8,0x28,0x00];
+  const coreC0 = [0xa0,0x20,0x00], coreC1 = [0xe0,0x42,0x0a];
+  const distWidth = 15; // widest layer below — the reveal mask matches this so no layer gets clipped
   for (const pts of paths) {
     for (let i = 1; i < pts.length; i++) {
       const p0 = pts[i-1], p1 = pts[i];
       const dAvg = (p0.d + p1.d) * 0.5;
-      const r = Math.round(c0[0] + (c1[0]-c0[0])*dAvg);
-      const g = Math.round(c0[1] + (c1[1]-c0[1])*dAvg);
-      const b = Math.round(c0[2] + (c1[2]-c0[2])*dAvg);
-      colorCtx.strokeStyle = `rgb(${r},${g},${b})`;
-      colorCtx.lineWidth = 5.5; colorCtx.lineCap = 'round'; colorCtx.lineJoin = 'round';
-      colorCtx.beginPath();
-      colorCtx.moveTo(p0.x, p0.y);
-      colorCtx.lineTo(p1.x, p1.y);
-      colorCtx.stroke();
+      const mix3 = (c0, c1) => c0.map((v, k) => Math.round(v + (c1[k]-v)*dAvg));
+
+      colorCtx.lineCap = 'round'; colorCtx.lineJoin = 'round';
+
+      const [hr,hg,hb] = mix3(haloC0, haloC1);
+      colorCtx.strokeStyle = `rgba(${hr},${hg},${hb},0.45)`;
+      colorCtx.lineWidth = distWidth;
+      colorCtx.beginPath(); colorCtx.moveTo(p0.x, p0.y); colorCtx.lineTo(p1.x, p1.y); colorCtx.stroke();
+
+      const [mr,mg,mb] = mix3(midC0, midC1);
+      colorCtx.strokeStyle = `rgb(${mr},${mg},${mb})`;
+      colorCtx.lineWidth = 8;
+      colorCtx.beginPath(); colorCtx.moveTo(p0.x, p0.y); colorCtx.lineTo(p1.x, p1.y); colorCtx.stroke();
+
+      const [cr,cg,cb] = mix3(coreC0, coreC1);
+      colorCtx.strokeStyle = `rgb(${cr},${cg},${cb})`;
+      colorCtx.lineWidth = 3;
+      colorCtx.beginPath(); colorCtx.moveTo(p0.x, p0.y); colorCtx.lineTo(p1.x, p1.y); colorCtx.stroke();
 
       const distByte = Math.max(1, Math.round(dAvg*255));
       distCtx.strokeStyle = `rgb(${distByte},${distByte},${distByte})`;
-      distCtx.lineWidth = 5.5; distCtx.lineCap = 'round'; distCtx.lineJoin = 'round';
+      distCtx.lineWidth = distWidth; distCtx.lineCap = 'round'; distCtx.lineJoin = 'round';
       distCtx.beginPath();
       distCtx.moveTo(p0.x, p0.y);
       distCtx.lineTo(p1.x, p1.y);
@@ -700,8 +717,16 @@ boulderAtlasTex.needsUpdate = true;
 const crackGlowAtlasTex = new THREE.CanvasTexture(glowAtlasCanvas);
 crackGlowAtlasTex.needsUpdate = true;
 crackGlowAtlasTex.generateMipmaps = false;
-crackGlowAtlasTex.minFilter = THREE.LinearFilter;
-crackGlowAtlasTex.magFilter = THREE.LinearFilter;
+// Nearest, not Linear — bilinear filtering blends each stroke's antialiased
+// width-wise edge against the transparent background, producing spurious
+// low-alpha texels along the ENTIRE crack length (not just the true fill
+// front). Since alpha here encodes distance-from-origin, those stray low
+// values satisfy the reveal threshold almost immediately, flashing a full
+// outline of the whole crack before the real progressive fill catches up.
+// Nearest sampling keeps every texel's alpha exactly its baked distance
+// value with no blended in-between values, so only the true front reveals.
+crackGlowAtlasTex.minFilter = THREE.NearestFilter;
+crackGlowAtlasTex.magFilter = THREE.NearestFilter;
 
 const boulderMaterial = new THREE.MeshStandardMaterial({
   roughness: 0.98, metalness: 0.0, flatShading: true,
@@ -768,7 +793,7 @@ boulderMaterial.onBeforeCompile = (shader) => {
       totalEmissiveRadiance += vec3(0.04, 0.03, 0.023);
       vec4 crackGlow = texture2D(uCrackGlowAtlas, vAtlasUv);
       float crackShow = step(0.0002, crackGlow.a) * step(crackGlow.a, vFillLevel);
-      totalEmissiveRadiance += crackGlow.rgb * crackShow;`);
+      totalEmissiveRadiance += crackGlow.rgb * crackShow * 1.4;`);
 };
 
 const boulderMesh = new THREE.InstancedMesh(boulderGeo, boulderMaterial, boulderDefs.length);
@@ -858,16 +883,18 @@ function updateBoulderHeat(dt){
   for (let i = activeCracks.length - 1; i >= 0; i--) {
     const c = activeCracks[i];
     const elapsed = (now - c.startTime) / 1000;
-    const fillDur  = 1.5;
-    const holdDur  = 1.0;
-    const drainDur = 4.0;
+    const fillDur  = 2.6;
+    const holdDur  = 1.3;
+    const drainDur = 5.5;
     let level = FILL_REST;
     if (elapsed < fillDur) {
-      level = elapsed / fillDur;
+      const t = elapsed / fillDur;
+      level = t*t*(3.0 - 2.0*t); // smoothstep ease — creeps in rather than a linear rush
     } else if (elapsed < fillDur + holdDur) {
       level = 1.0;
     } else if (elapsed < fillDur + holdDur + drainDur) {
-      level = 1.0 - (elapsed - fillDur - holdDur) / drainDur;
+      const t = (elapsed - fillDur - holdDur) / drainDur;
+      level = 1.0 - t*t*(3.0 - 2.0*t); // smoothstep ease — settles/pools back out gently
     } else {
       fillLevelArray[c.id] = FILL_REST;
       fillChanged = true;
