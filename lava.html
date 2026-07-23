@@ -448,6 +448,11 @@ function generateCrackPaths(seed, cx, cy, radius){
   return paths;
 }
 
+// fixed per-crack shading direction — keeps the shadow/highlight side of
+// every crack segment/branch on a boulder consistent, as if lit from one
+// place, instead of flipping with each segment's own travel direction.
+const CRACK_LIGHT_DIR = { x: -0.6, y: -0.8 };
+
 function makeBoulderTexture(seed, isVisible, crackPaths){
   const size = 256;
   const cnv = document.createElement('canvas');
@@ -455,7 +460,7 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
   const ctx = cnv.getContext('2d');
   const trng = mulberry32(seed >>> 0);
 
-  ctx.fillStyle = '#1f1a16';
+  ctx.fillStyle = '#1a1c1e';
   ctx.fillRect(0, 0, size, size);
 
   // broad tonal variation — soft overlapping blotches simulate mineral/
@@ -466,7 +471,7 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
   for (let i = 0; i < blotchCount; i++) {
     const bx = trng()*size, by = trng()*size, r = 28 + trng()*48;
     const dark = trng() > 0.5;
-    const rgb = dark ? '7,6,5' : '44,37,29';
+    const rgb = dark ? '6,6,7' : '36,37,39';
     const grad = ctx.createRadialGradient(bx, by, 0, bx, by, r);
     grad.addColorStop(0, `rgba(${rgb},${(0.35 + trng()*0.25).toFixed(2)})`);
     grad.addColorStop(1, `rgba(${rgb},0)`);
@@ -474,25 +479,63 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
     ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI*2); ctx.fill();
   }
 
-  // porous surface: scattered tiny dark pits
-  const pitCount = 600;
-  for (let i = 0; i < pitCount; i++) {
-    const x = trng()*size, y = trng()*size, r = 2 + trng()*3;
-    ctx.fillStyle = '#050403';
+  // organic porosity map — a few cluster centers where pitting concentrates
+  // heavily, and a few smoother patches where it thins out, so the pits/
+  // specks/grain below read as uneven weathering instead of a uniform
+  // repeating grain.
+  const clusterCount = 3 + Math.floor(trng()*3);
+  const clusters = [];
+  for (let i = 0; i < clusterCount; i++) {
+    clusters.push({ x: trng()*size, y: trng()*size, r: 40 + trng()*70, density: 0.6 + trng()*1.3 });
+  }
+  const smoothCount = 1 + Math.floor(trng()*2);
+  const smoothPatches = [];
+  for (let i = 0; i < smoothCount; i++) {
+    smoothPatches.push({ x: trng()*size, y: trng()*size, r: 30 + trng()*40 });
+  }
+  function porosity(x, y) {
+    let w = 0.35;
+    for (const c of clusters) {
+      const d = Math.hypot(x - c.x, y - c.y);
+      if (d < c.r) w += c.density * (1 - d / c.r);
+    }
+    for (const s of smoothPatches) {
+      const d = Math.hypot(x - s.x, y - s.y);
+      if (d < s.r) w *= 0.15 + 0.6 * (d / s.r);
+    }
+    return w;
+  }
+
+  // porous surface: scattered dark pits, clustered and size-varied rather
+  // than an even scatter, with fewer/smaller pits in the smoother patches
+  const pitAttempts = 1400;
+  for (let i = 0; i < pitAttempts; i++) {
+    const x = trng()*size, y = trng()*size;
+    if (trng() > porosity(x, y) * 0.5) continue;
+    const r = 1.5 + trng()*4.5;
+    ctx.fillStyle = '#040405';
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
   }
-  // highlight spots catching light
-  const highlightCount = 100;
-  for (let i = 0; i < highlightCount; i++) {
-    const x = trng()*size, y = trng()*size, r = 3 + trng()*4;
-    ctx.fillStyle = '#453c30';
+  // highlight spots catching light, following the same porosity map
+  const highlightAttempts = 260;
+  for (let i = 0; i < highlightAttempts; i++) {
+    const x = trng()*size, y = trng()*size;
+    if (trng() > porosity(x, y) * 0.4) continue;
+    const r = 2 + trng()*6;
+    ctx.fillStyle = '#3a3c3f';
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
   }
-  // fine noise grain simulating the micro-texture of volcanic rock
+  // fine noise grain simulating the micro-texture of volcanic rock, thinned
+  // out inside the smoother patches so they read calmer than the rest
   const noiseCount = 1000;
   for (let i = 0; i < noiseCount; i++) {
     const x = trng()*size, y = trng()*size;
-    ctx.fillStyle = i % 2 === 0 ? '#0a0807' : '#362e24';
+    let inSmooth = false;
+    for (const s of smoothPatches) {
+      if (Math.hypot(x - s.x, y - s.y) < s.r) { inSmooth = true; break; }
+    }
+    if (inSmooth && trng() > 0.4) continue;
+    ctx.fillStyle = i % 2 === 0 ? '#080809' : '#2c2e30';
     ctx.fillRect(x, y, 1, 1);
   }
 
@@ -503,27 +546,16 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         const p0 = pts[i-1], p1 = pts[i];
         const dx = p1.x - p0.x, dy = p1.y - p0.y;
         const segLen = Math.sqrt(dx*dx + dy*dy) || 1;
-        const nx = -dy/segLen, ny = dx/segLen;
-        const off = 1.4; // shadow/highlight offset — small enough to read as carved depth, not a double line
-
-        // shadow side — the far wall of the groove falling into shadow
-        ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(p0.x + nx*off, p0.y + ny*off);
-        ctx.lineTo(p1.x + nx*off, p1.y + ny*off);
-        ctx.stroke();
-
-        // highlight side — the near wall catching a little light
-        ctx.strokeStyle = 'rgba(130,105,80,0.45)';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(p0.x - nx*off, p0.y - ny*off);
-        ctx.lineTo(p1.x - nx*off, p1.y - ny*off);
-        ctx.stroke();
+        let nx = -dy/segLen, ny = dx/segLen;
+        // orient the normal toward the fixed light direction so the shadow/
+        // highlight sides stay consistent across every branch and segment
+        // on this boulder, instead of flipping with each segment's own
+        // travel direction.
+        if (nx*CRACK_LIGHT_DIR.x + ny*CRACK_LIGHT_DIR.y < 0) { nx = -nx; ny = -ny; }
+        const off = 2.4;
 
         // wide warm halo underneath, then a thin dark groove core on top —
-        // reads as a carved crack with real depth rather than a flat line.
+        // the base carved line, shaded below on top of it.
         ctx.strokeStyle = 'rgba(58,10,0,0.9)';
         ctx.lineWidth = 9;
         ctx.beginPath();
@@ -535,6 +567,24 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
+
+        // shadow side — drawn ON TOP of the halo/core (not under it) so it
+        // actually reads as a dark rim cut into the rock instead of being
+        // buried under the wider fill beneath it
+        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(p0.x - nx*off, p0.y - ny*off);
+        ctx.lineTo(p1.x - nx*off, p1.y - ny*off);
+        ctx.stroke();
+
+        // highlight side — the wall facing CRACK_LIGHT_DIR, also on top
+        ctx.strokeStyle = 'rgba(120,122,126,0.5)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(p0.x + nx*off, p0.y + ny*off);
+        ctx.lineTo(p1.x + nx*off, p1.y + ny*off);
+        ctx.stroke();
       }
     }
   }
@@ -542,8 +592,8 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
   // dark edge vignette — the outer 20% of the canvas fades toward near-black
   // so adjacent boulders read as separate rocks instead of blending together.
   const vignette = ctx.createRadialGradient(size/2, size/2, size*0.4, size/2, size/2, size*0.5);
-  vignette.addColorStop(0, 'rgba(3,2,2,0)');
-  vignette.addColorStop(1, '#030202');
+  vignette.addColorStop(0, 'rgba(2,2,3,0)');
+  vignette.addColorStop(1, '#020203');
   ctx.fillStyle = vignette;
   ctx.fillRect(0, 0, size, size);
 
