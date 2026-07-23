@@ -384,55 +384,66 @@ const CRACK_SEED_SALT = 7919;
 function generateCrackPaths(seed, cx, cy, radius){
   const rng = mulberry32(seed >>> 0);
   const r = (a, b) => a + rng() * (b - a);
-  const branches = 4 + Math.floor(r(0, 4));
+
+  // Jitter the crack hub off dead-center so every boulder's fracture
+  // network doesn't radiate from the exact same spot.
+  const originX = cx + r(-0.22, 0.22) * radius;
+  const originY = cy + r(-0.22, 0.22) * radius;
+
+  // Uneven angular wedges instead of evenly-spaced spokes — branches
+  // cluster together in places and leave big gaps elsewhere.
+  const branchCount = 3 + Math.floor(r(0, 5));
+  const wedges = [];
+  let wedgeTotal = 0;
+  for (let i = 0; i < branchCount; i++) {
+    const w = r(0.4, 1.6);
+    wedges.push(w);
+    wedgeTotal += w;
+  }
+  let angleCursor = r(0, Math.PI * 2);
+  const branchAngles = [];
+  for (let i = 0; i < branchCount; i++) {
+    angleCursor += (wedges[i] / wedgeTotal) * Math.PI * 2;
+    branchAngles.push(angleCursor + r(-0.35, 0.35));
+  }
+
   const paths = [];
-  // distance-along-path (from the crack's origin) drives the tap fill-reveal
-  // below — every point gets one, then it's normalized to 0..1 by the
-  // longest reach across all branches, so the fill sweeps outward from the
-  // origin at a uniform rate regardless of which branch it's traveling down.
   let maxReach = 0.0001;
-  for (let i = 0; i < branches; i++) {
-    const isAngular = rng() > 0.5;
-    const ang = (i / branches) * Math.PI * 2 + r(-0.6, 0.6);
-    const len = radius * r(0.7, 1.3);
-    const segs = isAngular ? 3 + Math.floor(r(0, 2)) : 6 + Math.floor(r(0, 4));
-    const pts = [{ x: cx, y: cy, d: 0 }];
-    let x = cx, y = cy, a = ang, cumLen = 0;
+
+  function growBranch(startX, startY, startAng, len, startD, depth){
+    const jag = r(0.55, 1.0);          // how sharply this branch zigzags
+    const segs = 3 + Math.floor(r(0, 4));
+    const pts = [{ x: startX, y: startY, d: startD }];
+    let x = startX, y = startY, a = startAng, cumLen = startD;
     for (let s = 0; s < segs; s++) {
-      if (isAngular) {
-        a += r(-0.3, 0.3);
-      } else {
-        a += r(-0.5, 0.5);
-      }
-      const step = len / segs;
+      a += r(-0.9, 0.9) * jag;                  // sharp, uneven turns
+      const step = (len / segs) * r(0.55, 1.5);  // uneven segment lengths
       x += Math.cos(a) * step;
       y += Math.sin(a) * step;
       cumLen += step;
       pts.push({ x, y, d: cumLen });
     }
     maxReach = Math.max(maxReach, cumLen);
-    // sub-branches
-    if (rng() > 0.5) {
-      const midIdx = Math.floor(pts.length / 2);
-      const midPt = pts[midIdx];
-      const subAng = ang + r(0.4, 1.0) * (rng() > 0.5 ? 1 : -1);
-      const subLen = len * r(0.3, 0.6);
-      const subSegs = 3 + Math.floor(r(0, 2));
-      const subPts = [{ x: midPt.x, y: midPt.y, d: midPt.d }];
-      let sx = midPt.x, sy = midPt.y, sa = subAng, subCumLen = midPt.d;
-      for (let s = 0; s < subSegs; s++) {
-        sa += r(-0.4, 0.4);
-        const step = subLen / subSegs;
-        sx += Math.cos(sa) * step;
-        sy += Math.sin(sa) * step;
-        subCumLen += step;
-        subPts.push({ x: sx, y: sy, d: subCumLen });
-      }
-      maxReach = Math.max(maxReach, subCumLen);
-      paths.push(subPts);
-    }
     paths.push(pts);
+
+    // recursive offshoots, up to 2 levels deep, shrinking each level —
+    // gives a fractal fractured-rock look instead of one optional sub-branch
+    if (depth < 2 && rng() > 0.45) {
+      const subCount = 1 + Math.floor(r(0, 2));
+      for (let k = 0; k < subCount; k++) {
+        const along = pts[1 + Math.floor(r(0, pts.length - 1))];
+        const subAng = a + r(0.5, 1.3) * (rng() > 0.5 ? 1 : -1);
+        const subLen = len * r(0.25, 0.55);
+        growBranch(along.x, along.y, subAng, subLen, along.d, depth + 1);
+      }
+    }
   }
+
+  for (let i = 0; i < branchCount; i++) {
+    const len = radius * r(0.55, 1.35);
+    growBranch(originX, originY, branchAngles[i], len, 0, 0);
+  }
+
   for (const pts of paths) for (const p of pts) p.d /= maxReach;
   return paths;
 }
@@ -470,19 +481,19 @@ function makeBoulderTexture(seed, isVisible){
   }
 
   if (isVisible) {
-    const paths = generateCrackPaths(seed ^ 0x51ed270b, size/2, size/2, size*0.42);
+    const paths = generateCrackPaths(seed ^ 0x51ed270b, size/2, size/2, size*0.6);
     for (const pts of paths) {
       // wide warm halo underneath, then a thin dark groove on top — reads
       // as a carved crack with a bit of depth rather than a flat line.
       ctx.strokeStyle = 'rgba(58,10,0,0.9)';
-      ctx.lineWidth = 7; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.lineWidth = 9; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
       for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
       ctx.stroke();
 
       ctx.strokeStyle = '#000000';
-      ctx.lineWidth = 3;
+      ctx.lineWidth = 4;
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
       for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
@@ -505,7 +516,7 @@ function makeBoulderTexture(seed, isVisible){
 
 function makeCrackGlowTexture(seed){
   const size = 256;
-  const paths = generateCrackPaths(seed ^ 0x51ed270b, size/2, size/2, size*0.42); // same transform as the groove pass above, so patterns match exactly
+  const paths = generateCrackPaths(seed ^ 0x51ed270b, size/2, size/2, size*0.6); // same transform as the groove pass above, so patterns match exactly
 
   // RGB is baked on one canvas, and normalized distance-from-origin (for the
   // tap fill-reveal) is baked as grayscale on a second — then merged so the
@@ -524,7 +535,7 @@ function makeCrackGlowTexture(seed){
       const g = Math.round(c0[1] + (c1[1]-c0[1])*dAvg);
       const b = Math.round(c0[2] + (c1[2]-c0[2])*dAvg);
       colorCtx.strokeStyle = `rgb(${r},${g},${b})`;
-      colorCtx.lineWidth = 4; colorCtx.lineCap = 'round'; colorCtx.lineJoin = 'round';
+      colorCtx.lineWidth = 5.5; colorCtx.lineCap = 'round'; colorCtx.lineJoin = 'round';
       colorCtx.beginPath();
       colorCtx.moveTo(p0.x, p0.y);
       colorCtx.lineTo(p1.x, p1.y);
@@ -532,7 +543,7 @@ function makeCrackGlowTexture(seed){
 
       const distByte = Math.max(1, Math.round(dAvg*255));
       distCtx.strokeStyle = `rgb(${distByte},${distByte},${distByte})`;
-      distCtx.lineWidth = 4; distCtx.lineCap = 'round'; distCtx.lineJoin = 'round';
+      distCtx.lineWidth = 5.5; distCtx.lineCap = 'round'; distCtx.lineJoin = 'round';
       distCtx.beginPath();
       distCtx.moveTo(p0.x, p0.y);
       distCtx.lineTo(p1.x, p1.y);
@@ -593,6 +604,9 @@ const boulderAtlasTex = new THREE.CanvasTexture(atlasCanvas);
 boulderAtlasTex.needsUpdate = true;
 const crackGlowAtlasTex = new THREE.CanvasTexture(glowAtlasCanvas);
 crackGlowAtlasTex.needsUpdate = true;
+crackGlowAtlasTex.generateMipmaps = false;
+crackGlowAtlasTex.minFilter = THREE.LinearFilter;
+crackGlowAtlasTex.magFilter = THREE.LinearFilter;
 
 const boulderMaterial = new THREE.MeshStandardMaterial({
   roughness: 0.98, metalness: 0.0, flatShading: true,
@@ -686,7 +700,17 @@ const fillLevelArray = new Float32Array(boulderDefs.length);
     riverSideArray[i] = (cx - b.x) >= 0 ? 1 : -1;
   });
 }
-boulderGeo.setAttribute('aLocalUv', boulderGeo.attributes.uv);
+{
+  const pos = boulderGeo.attributes.position;
+  const localUv = new Float32Array(pos.count * 2);
+  const PROJ_RADIUS = 1.4; // covers the jittered sphere's max horizontal extent (~1.325) with headroom
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i);
+    localUv[i*2]   = THREE.MathUtils.clamp(x / PROJ_RADIUS * 0.5 + 0.5, 0, 1);
+    localUv[i*2+1] = THREE.MathUtils.clamp(z / PROJ_RADIUS * 0.5 + 0.5, 0, 1);
+  }
+  boulderGeo.setAttribute('aLocalUv', new THREE.Float32BufferAttribute(localUv, 2));
+}
 boulderGeo.setAttribute('aHeat', new THREE.InstancedBufferAttribute(heatArray, 1));
 boulderGeo.setAttribute('aRiverGlow', new THREE.InstancedBufferAttribute(riverGlowArray, 1));
 boulderGeo.setAttribute('aRiverSide', new THREE.InstancedBufferAttribute(riverSideArray, 1));
