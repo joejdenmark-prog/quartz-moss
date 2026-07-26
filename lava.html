@@ -624,11 +624,14 @@ function makeCrackGlowTexture(seed, paths){
   // still within the orange family (not a light/bright orange) at the tip.
   // Drawn in three widening-to-narrowing layers (soft outer halo, mid band,
   // bright hot core) so the baked glow itself carries bloom-like spread and
-  // a brighter center, instead of one flat-colored line.
-  const haloC0 = [0x50,0x0b,0x00], haloC1 = [0x7c,0x1a,0x00];
-  const midC0  = [0x7c,0x11,0x00], midC1  = [0xa8,0x28,0x00];
-  const coreC0 = [0xa0,0x20,0x00], coreC1 = [0xe0,0x42,0x0a];
-  const distWidth = 7; // widest layer below — the reveal mask matches this so no layer gets clipped
+  // a brighter center, instead of one flat-colored line. Green channel is
+  // kept low relative to red throughout (even at the hot core) so the
+  // dominant read stays deep red-orange rather than tipping into orange-
+  // yellow once boosted through the emissive multiplier below.
+  const haloC0 = [0x28,0x02,0x00], haloC1 = [0x46,0x06,0x00];
+  const midC0  = [0x46,0x04,0x00], midC1  = [0x64,0x0a,0x00];
+  const coreC0 = [0x6e,0x0a,0x00], coreC1 = [0xa0,0x1a,0x04];
+  const distWidth = 13; // widest layer below — the reveal mask matches this so no layer gets clipped
   for (const pts of paths) {
     for (let i = 1; i < pts.length; i++) {
       const p0 = pts[i-1], p1 = pts[i];
@@ -638,18 +641,18 @@ function makeCrackGlowTexture(seed, paths){
       colorCtx.lineCap = 'round'; colorCtx.lineJoin = 'round';
 
       const [hr,hg,hb] = mix3(haloC0, haloC1);
-      colorCtx.strokeStyle = `rgba(${hr},${hg},${hb},0.45)`;
+      colorCtx.strokeStyle = `rgba(${hr},${hg},${hb},0.6)`;
       colorCtx.lineWidth = distWidth;
       colorCtx.beginPath(); colorCtx.moveTo(p0.x, p0.y); colorCtx.lineTo(p1.x, p1.y); colorCtx.stroke();
 
       const [mr,mg,mb] = mix3(midC0, midC1);
       colorCtx.strokeStyle = `rgb(${mr},${mg},${mb})`;
-      colorCtx.lineWidth = 4;
+      colorCtx.lineWidth = 7;
       colorCtx.beginPath(); colorCtx.moveTo(p0.x, p0.y); colorCtx.lineTo(p1.x, p1.y); colorCtx.stroke();
 
       const [cr,cg,cb] = mix3(coreC0, coreC1);
       colorCtx.strokeStyle = `rgb(${cr},${cg},${cb})`;
-      colorCtx.lineWidth = 1.6;
+      colorCtx.lineWidth = 2.2;
       colorCtx.beginPath(); colorCtx.moveTo(p0.x, p0.y); colorCtx.lineTo(p1.x, p1.y); colorCtx.stroke();
 
       const distByte = Math.max(1, Math.round(dAvg*255));
@@ -806,7 +809,7 @@ boulderMaterial.onBeforeCompile = (shader) => {
       totalEmissiveRadiance += vec3(0.017, 0.0127, 0.0097);
       vec4 crackGlow = texture2D(uCrackGlowAtlas, vAtlasUv);
       float crackShow = step(0.0002, crackGlow.a) * step(crackGlow.a, vFillLevel);
-      totalEmissiveRadiance += crackGlow.rgb * crackShow * 1.4;`);
+      totalEmissiveRadiance += crackGlow.rgb * crackShow * 1.6;`);
 };
 
 const boulderMesh = new THREE.InstancedMesh(boulderGeo, boulderMaterial, boulderDefs.length);
