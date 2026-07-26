@@ -391,8 +391,10 @@ function generateCrackPaths(seed, cx, cy, radius){
   const originY = cy + r(-0.22, 0.22) * radius;
 
   // Uneven angular wedges instead of evenly-spaced spokes — branches
-  // cluster together in places and leave big gaps elsewhere.
-  const branchCount = 3 + Math.floor(r(0, 5));
+  // cluster together in places and leave big gaps elsewhere. Kept modest
+  // (was 3-7) since combined with sub-branches below, the higher end read
+  // as a tangled cluster rather than a legible fracture pattern.
+  const branchCount = 2 + Math.floor(r(0, 3));
   const wedges = [];
   let wedgeTotal = 0;
   for (let i = 0; i < branchCount; i++) {
@@ -431,16 +433,16 @@ function generateCrackPaths(seed, cx, cy, radius){
     maxReach = Math.max(maxReach, cumLen);
     paths.push(pts);
 
-    // recursive offshoots, up to 2 levels deep, shrinking each level —
-    // gives a fractal fractured-rock look instead of one optional sub-branch
-    if (depth < 2 && rng() > 0.45) {
-      const subCount = 1 + Math.floor(r(0, 2));
-      for (let k = 0; k < subCount; k++) {
-        const along = pts[1 + Math.floor(r(0, pts.length - 1))];
-        const subAng = a + r(0.5, 1.3) * (rng() > 0.5 ? 1 : -1);
-        const subLen = len * r(0.25, 0.55);
-        growBranch(along.x, along.y, subAng, subLen, along.d, depth + 1);
-      }
+    // At most one level of offshoots, and only sometimes, and always just a
+    // single one — was up to two recursive levels with 1-2 offshoots each,
+    // which compounded into a dense, hard-to-follow tangle. A single
+    // occasional offshoot per branch still reads as a fracture network, just
+    // a legible one.
+    if (depth < 1 && rng() > 0.7) {
+      const along = pts[1 + Math.floor(r(0, pts.length - 1))];
+      const subAng = a + r(0.5, 1.3) * (rng() > 0.5 ? 1 : -1);
+      const subLen = len * r(0.25, 0.55);
+      growBranch(along.x, along.y, subAng, subLen, along.d, depth + 1);
     }
   }
 
@@ -984,9 +986,9 @@ function updateBoulderHeat(dt){
   for (let i = activeCracks.length - 1; i >= 0; i--) {
     const c = activeCracks[i];
     const elapsed = (now - c.startTime) / 1000;
-    const fillDur  = 8.5;
-    const holdDur  = 2.5;
-    const drainDur = 9.5;
+    const fillDur  = 5.0;
+    const holdDur  = 1.8;
+    const drainDur = 6.5;
     let level = FILL_REST;
     if (elapsed < fillDur) {
       const t = elapsed / fillDur;
