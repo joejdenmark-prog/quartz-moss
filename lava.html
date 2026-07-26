@@ -411,14 +411,18 @@ function generateCrackPaths(seed, cx, cy, radius){
   let maxReach = 0.0001;
 
   function growBranch(startX, startY, startAng, len, startD, depth){
-    const jag = r(0.6, 1.15);          // how sharply this branch zigzags
-    const segs = 4 + Math.floor(r(0, 5));
+    // few, long, straight segments with a wide alternating-side angle change
+    // at each joint — reads as an angular lightning-bolt/fracture trajectory
+    // rather than a smooth many-point curve.
+    const segs = 2 + Math.floor(r(0, 3));
     const pts = [{ x: startX, y: startY, d: startD }];
     let x = startX, y = startY, a = startAng, cumLen = startD;
+    let turnSign = rng() > 0.5 ? 1 : -1;
     for (let s = 0; s < segs; s++) {
-      const sharp = rng() < 0.3 ? 1.5 : 1.0;     // occasional abrupt fracture kink
-      a += r(-1.0, 1.0) * jag * sharp;           // sharp, uneven, sometimes sudden turns
-      const step = (len / segs) * r(0.45, 1.55); // uneven segment lengths
+      const sharp = rng() < 0.3 ? 1.5 : 1.0;      // occasional extra-sharp kink
+      a += turnSign * r(0.5, 1.35) * sharp;       // wide, deliberate angle change per joint
+      turnSign *= -1;                             // alternate sides at each joint
+      const step = (len / segs) * r(0.6, 1.5);    // uneven segment lengths
       x += Math.cos(a) * step;
       y += Math.sin(a) * step;
       cumLen += step;
