@@ -450,6 +450,36 @@ function generateCrackPaths(seed, cx, cy, radius){
   }
 
   for (const pts of paths) for (const p of pts) p.d /= maxReach;
+
+  // Re-anchor "distance" to a point ALONG the crack itself — the median
+  // point across the whole fracture network — instead of the hub all
+  // branches grow from. Left as-is, d=0 always sits at the hub (near the
+  // boulder's center), so the tap-fill reveal (driven by this value in
+  // makeCrackGlowTexture) would always well up there first and radiate
+  // outward across every branch at once, reading as spreading out from the
+  // rock's center rather than creeping along the crack. Remapping every
+  // point's d to its distance from this anchor instead makes the reveal
+  // start inside the crack and creep outward in both directions. The median
+  // (rather than, say, one branch's own midpoint) keeps the split balanced
+  // regardless of how lopsided the branch lengths are — a single branch's
+  // midpoint can sit far out toward one tip, leaving most of the rest of
+  // the network on one side and barely revealing at low fill levels. Only
+  // this bookkeeping value changes here; the x/y path geometry (and
+  // therefore the crack's visible shape) is untouched.
+  let anchorD = 0.5;
+  if (paths.length) {
+    const allD = [];
+    for (const pts of paths) for (const p of pts) allD.push(p.d);
+    allD.sort((a, b) => a - b);
+    anchorD = allD[Math.floor(allD.length / 2)];
+  }
+  let maxSpread = 0.0001;
+  for (const pts of paths) for (const p of pts) {
+    p.d = Math.abs(p.d - anchorD);
+    maxSpread = Math.max(maxSpread, p.d);
+  }
+  for (const pts of paths) for (const p of pts) p.d /= maxSpread;
+
   return paths;
 }
 
@@ -557,18 +587,18 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         // on this boulder, instead of flipping with each segment's own
         // travel direction.
         if (nx*CRACK_LIGHT_DIR.x + ny*CRACK_LIGHT_DIR.y < 0) { nx = -nx; ny = -ny; }
-        const off = 1.6;
+        const off = 2.1;
 
         // slim warm halo underneath, then a thin dark groove core on top —
         // the base carved line, shaded below on top of it.
         ctx.strokeStyle = 'rgba(58,10,0,0.9)';
-        ctx.lineWidth = 5;
+        ctx.lineWidth = 6.5;
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
 
         ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 2.2;
+        ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
@@ -576,16 +606,16 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         // shadow side — drawn ON TOP of the halo/core (not under it) so it
         // actually reads as a dark rim cut into the rock instead of being
         // buried under the wider fill beneath it
-        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
-        ctx.lineWidth = 1.8;
+        ctx.strokeStyle = 'rgba(0,0,0,0.92)';
+        ctx.lineWidth = 2.3;
         ctx.beginPath();
         ctx.moveTo(p0.x - nx*off, p0.y - ny*off);
         ctx.lineTo(p1.x - nx*off, p1.y - ny*off);
         ctx.stroke();
 
         // highlight side — the wall facing CRACK_LIGHT_DIR, also on top
-        ctx.strokeStyle = 'rgba(158,161,166,0.7)';
-        ctx.lineWidth = 1.4;
+        ctx.strokeStyle = 'rgba(158,161,166,0.8)';
+        ctx.lineWidth = 1.9;
         ctx.beginPath();
         ctx.moveTo(p0.x + nx*off, p0.y + ny*off);
         ctx.lineTo(p1.x + nx*off, p1.y + ny*off);
@@ -923,9 +953,9 @@ function updateBoulderHeat(dt){
   for (let i = activeCracks.length - 1; i >= 0; i--) {
     const c = activeCracks[i];
     const elapsed = (now - c.startTime) / 1000;
-    const fillDur  = 4.0;
-    const holdDur  = 1.6;
-    const drainDur = 6.5;
+    const fillDur  = 6.0;
+    const holdDur  = 2.0;
+    const drainDur = 8.0;
     let level = FILL_REST;
     if (elapsed < fillDur) {
       const t = elapsed / fillDur;
