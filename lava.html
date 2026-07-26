@@ -655,8 +655,17 @@ function makeCrackGlowTexture(seed, paths){
       colorCtx.lineWidth = 2.2;
       colorCtx.beginPath(); colorCtx.moveTo(p0.x, p0.y); colorCtx.lineTo(p1.x, p1.y); colorCtx.stroke();
 
-      const distByte = Math.max(1, Math.round(dAvg*255));
-      distCtx.strokeStyle = `rgb(${distByte},${distByte},${distByte})`;
+      // distance is baked as a gradient along each segment (from p0.d to
+      // p1.d) rather than one flat value at the segment's midpoint — a flat
+      // per-segment value made the whole segment reveal at once the instant
+      // the fill level crossed its single threshold, stepping between
+      // joints instead of sweeping continuously along the crack.
+      const d0Byte = Math.max(1, Math.round(p0.d*255));
+      const d1Byte = Math.max(1, Math.round(p1.d*255));
+      const distGrad = distCtx.createLinearGradient(p0.x, p0.y, p1.x, p1.y);
+      distGrad.addColorStop(0, `rgb(${d0Byte},${d0Byte},${d0Byte})`);
+      distGrad.addColorStop(1, `rgb(${d1Byte},${d1Byte},${d1Byte})`);
+      distCtx.strokeStyle = distGrad;
       distCtx.lineWidth = distWidth; distCtx.lineCap = 'round'; distCtx.lineJoin = 'round';
       distCtx.beginPath();
       distCtx.moveTo(p0.x, p0.y);
@@ -665,23 +674,11 @@ function makeCrackGlowTexture(seed, paths){
     }
   }
 
-  const colorData = colorCtx.getImageData(0, 0, size, size);
-  const distData = distCtx.getImageData(0, 0, size, size);
-  const out = colorCtx.createImageData(size, size);
-  for (let i = 0; i < size*size; i++) {
-    const o = i*4;
-    const hasCrack = distData.data[o+3] > 0;
-    out.data[o]   = colorData.data[o];
-    out.data[o+1] = colorData.data[o+1];
-    out.data[o+2] = colorData.data[o+2];
-    out.data[o+3] = hasCrack ? distData.data[o] : 0;
-  }
-  const outCnv = document.createElement('canvas'); outCnv.width = outCnv.height = size;
-  outCnv.getContext('2d').putImageData(out, 0, 0);
-
-  const tex = new THREE.CanvasTexture(outCnv);
-  tex.needsUpdate = true;
-  return tex;
+  // returned as two separate canvases (not merged into one texture) so the
+  // color layer can be sampled with smooth linear filtering for clean edges,
+  // while the distance layer keeps exact nearest-neighbor sampling — see the
+  // filter settings where these are turned into textures, below.
+  return { colorCnv, distCnv };
 }
 
 const VISIBLE_X = 4.62;
@@ -694,9 +691,15 @@ const atlasRows = Math.max(1, Math.ceil((visibleBoulderIdx.length + 1) / atlasCo
 const atlasCanvas = document.createElement('canvas');
 atlasCanvas.width = atlasCols * ATLAS_CELL; atlasCanvas.height = atlasRows * ATLAS_CELL;
 const atlasCtx = atlasCanvas.getContext('2d');
-const glowAtlasCanvas = document.createElement('canvas');
-glowAtlasCanvas.width = atlasCols * ATLAS_CELL; glowAtlasCanvas.height = atlasRows * ATLAS_CELL;
-const glowAtlasCtx = glowAtlasCanvas.getContext('2d');
+// glow color and glow distance are kept as two separate atlases so each can
+// use its own GPU filtering (see the texture setup below) — smooth linear
+// for the visible color, exact nearest for the reveal-threshold distance.
+const glowColorAtlasCanvas = document.createElement('canvas');
+glowColorAtlasCanvas.width = atlasCols * ATLAS_CELL; glowColorAtlasCanvas.height = atlasRows * ATLAS_CELL;
+const glowColorAtlasCtx = glowColorAtlasCanvas.getContext('2d');
+const glowDistAtlasCanvas = document.createElement('canvas');
+glowDistAtlasCanvas.width = atlasCols * ATLAS_CELL; glowDistAtlasCanvas.height = atlasRows * ATLAS_CELL;
+const glowDistAtlasCtx = glowDistAtlasCanvas.getContext('2d');
 
 const atlasOffsetArray = new Float32Array(boulderDefs.length * 2); // defaults to (0,0) — cell 0, the shared generic texture
 const cellUvW = 1 / atlasCols, cellUvH = 1 / atlasRows;
@@ -714,26 +717,44 @@ visibleBoulderIdx.forEach((idx, n) => {
   // that happen to agree.
   const crackPaths = generateCrackPaths(seed ^ 0x51ed270b, ATLAS_CELL/2, ATLAS_CELL/2, ATLAS_CELL*0.6);
   atlasCtx.drawImage(makeBoulderTexture(seed, true, crackPaths).image, col*ATLAS_CELL, row*ATLAS_CELL);
-  glowAtlasCtx.drawImage(makeCrackGlowTexture(seed, crackPaths).image, col*ATLAS_CELL, row*ATLAS_CELL);
+  const glow = makeCrackGlowTexture(seed, crackPaths);
+  glowColorAtlasCtx.drawImage(glow.colorCnv, col*ATLAS_CELL, row*ATLAS_CELL);
+  glowDistAtlasCtx.drawImage(glow.distCnv, col*ATLAS_CELL, row*ATLAS_CELL);
   atlasOffsetArray[idx*2] = col * cellUvW;
   atlasOffsetArray[idx*2+1] = row * cellUvH;
 });
 
 const boulderAtlasTex = new THREE.CanvasTexture(atlasCanvas);
 boulderAtlasTex.needsUpdate = true;
-const crackGlowAtlasTex = new THREE.CanvasTexture(glowAtlasCanvas);
-crackGlowAtlasTex.needsUpdate = true;
-crackGlowAtlasTex.generateMipmaps = false;
+// Mipmaps off — this is a packed texture atlas, and mipmap generation blurs
+// across the whole texture including cell borders, bleeding neighboring
+// boulders' colors into each other's edges at lower mip levels. Plain
+// linear filtering (no mips) keeps every cell's crack/pit detail clean.
+boulderAtlasTex.generateMipmaps = false;
+boulderAtlasTex.minFilter = THREE.LinearFilter;
+boulderAtlasTex.magFilter = THREE.LinearFilter;
+
+const crackGlowColorAtlasTex = new THREE.CanvasTexture(glowColorAtlasCanvas);
+crackGlowColorAtlasTex.needsUpdate = true;
+crackGlowColorAtlasTex.generateMipmaps = false;
+crackGlowColorAtlasTex.minFilter = THREE.LinearFilter;
+crackGlowColorAtlasTex.magFilter = THREE.LinearFilter;
+
+const crackGlowDistAtlasTex = new THREE.CanvasTexture(glowDistAtlasCanvas);
+crackGlowDistAtlasTex.needsUpdate = true;
+crackGlowDistAtlasTex.generateMipmaps = false;
 // Nearest, not Linear — bilinear filtering blends each stroke's antialiased
 // width-wise edge against the transparent background, producing spurious
-// low-alpha texels along the ENTIRE crack length (not just the true fill
-// front). Since alpha here encodes distance-from-origin, those stray low
-// values satisfy the reveal threshold almost immediately, flashing a full
-// outline of the whole crack before the real progressive fill catches up.
-// Nearest sampling keeps every texel's alpha exactly its baked distance
-// value with no blended in-between values, so only the true front reveals.
-crackGlowAtlasTex.minFilter = THREE.NearestFilter;
-crackGlowAtlasTex.magFilter = THREE.NearestFilter;
+// low values along the ENTIRE crack length (not just the true fill front).
+// Since this channel encodes distance-from-origin, those stray low values
+// satisfy the reveal threshold almost immediately, flashing a full outline
+// of the whole crack before the real progressive fill catches up. Nearest
+// sampling keeps every texel exactly its baked distance value with no
+// blended in-between values, so only the true front reveals. This is kept
+// on its own texture (the color atlas above uses smooth linear filtering)
+// so the visible glow edge isn't blocky even though this channel is exact.
+crackGlowDistAtlasTex.minFilter = THREE.NearestFilter;
+crackGlowDistAtlasTex.magFilter = THREE.NearestFilter;
 
 const boulderMaterial = new THREE.MeshStandardMaterial({
   roughness: 0.98, metalness: 0.0, flatShading: true,
@@ -747,7 +768,8 @@ boulderMaterial.onBeforeCompile = (shader) => {
   // manually instead, against a self-contained varying (vAtlasUv) computed
   // from a custom attribute, so nothing depends on three's internal naming.
   shader.uniforms.uBoulderAtlas = { value: boulderAtlasTex };
-  shader.uniforms.uCrackGlowAtlas = { value: crackGlowAtlasTex };
+  shader.uniforms.uCrackGlowColorAtlas = { value: crackGlowColorAtlasTex };
+  shader.uniforms.uCrackGlowDistAtlas = { value: crackGlowDistAtlasTex };
   shader.uniforms.uAtlasCellUv = { value: new THREE.Vector2(cellUvW, cellUvH) };
   shader.vertexShader = shader.vertexShader
     .replace('#include <common>', `#include <common>
@@ -773,7 +795,8 @@ boulderMaterial.onBeforeCompile = (shader) => {
   shader.fragmentShader = shader.fragmentShader
     .replace('#include <common>', `#include <common>
       uniform sampler2D uBoulderAtlas;
-      uniform sampler2D uCrackGlowAtlas;
+      uniform sampler2D uCrackGlowColorAtlas;
+      uniform sampler2D uCrackGlowDistAtlas;
       varying vec2 vAtlasUv;
       varying float vHeat;
       varying float vRiverGlow;
@@ -807,9 +830,10 @@ boulderMaterial.onBeforeCompile = (shader) => {
       // black by the tone curve, but low enough that the rock itself reads
       // as near-black rather than dark gray.
       totalEmissiveRadiance += vec3(0.017, 0.0127, 0.0097);
-      vec4 crackGlow = texture2D(uCrackGlowAtlas, vAtlasUv);
-      float crackShow = step(0.0002, crackGlow.a) * step(crackGlow.a, vFillLevel);
-      totalEmissiveRadiance += crackGlow.rgb * crackShow * 1.6;`);
+      vec3 crackGlowColor = texture2D(uCrackGlowColorAtlas, vAtlasUv).rgb;
+      float crackDist = texture2D(uCrackGlowDistAtlas, vAtlasUv).r;
+      float crackShow = step(0.0002, crackDist) * step(crackDist, vFillLevel);
+      totalEmissiveRadiance += crackGlowColor * crackShow * 1.6;`);
 };
 
 const boulderMesh = new THREE.InstancedMesh(boulderGeo, boulderMaterial, boulderDefs.length);
@@ -899,9 +923,9 @@ function updateBoulderHeat(dt){
   for (let i = activeCracks.length - 1; i >= 0; i--) {
     const c = activeCracks[i];
     const elapsed = (now - c.startTime) / 1000;
-    const fillDur  = 2.6;
-    const holdDur  = 1.3;
-    const drainDur = 5.5;
+    const fillDur  = 4.0;
+    const holdDur  = 1.6;
+    const drainDur = 6.5;
     let level = FILL_REST;
     if (elapsed < fillDur) {
       const t = elapsed / fillDur;
