@@ -784,13 +784,22 @@ boulderMaterial.onBeforeCompile = (shader) => {
       // treated the same way here — used directly, no decode.
       vec3 texRaw = texture2D(uBoulderAtlas, vAtlasUv).rgb;
       diffuseColor.rgb = texRaw;`)
+    .replace('#include <lights_fragment_begin>', `#include <lights_fragment_begin>
+      // pull down this material's response to ambient/hemisphere skylight
+      // specifically — not the direct sun/fill/rim lights below, which still
+      // light each facet and give the pits/cracks their readable contrast —
+      // so shadowed rock can settle much closer to true black instead of
+      // being lifted by a flat ambient wash.
+      reflectedLight.indirectDiffuse *= 0.35;`)
     .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
       float h = clamp(vHeat, 0.0, 1.0);
       vec3 riverGlowColor = vec3(0.48,0.055,0.03);
       totalEmissiveRadiance += riverGlowColor * vRiverGlow * vRiverFacing * 0.425;
-      // baseline visibility floor — without this, this dark an albedo gets
-      // crushed to pure black by the tone curve tuned for the bright lava.
-      totalEmissiveRadiance += vec3(0.04, 0.03, 0.023);
+      // baseline visibility floor, lowered from its original value — still
+      // enough that pit/speckle/crack detail doesn't get crushed to pure
+      // black by the tone curve, but low enough that the rock itself reads
+      // as near-black rather than dark gray.
+      totalEmissiveRadiance += vec3(0.017, 0.0127, 0.0097);
       vec4 crackGlow = texture2D(uCrackGlowAtlas, vAtlasUv);
       float crackShow = step(0.0002, crackGlow.a) * step(crackGlow.a, vFillLevel);
       totalEmissiveRadiance += crackGlow.rgb * crackShow * 1.4;`);
