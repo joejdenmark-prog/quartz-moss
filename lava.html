@@ -587,18 +587,23 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         // on this boulder, instead of flipping with each segment's own
         // travel direction.
         if (nx*CRACK_LIGHT_DIR.x + ny*CRACK_LIGHT_DIR.y < 0) { nx = -nx; ny = -ny; }
-        const off = 2.1;
+        // Widened substantially from the prior pass — at the 256px atlas
+        // cell's resolution, that increase (~5→6.5px) shrank to a sub-pixel
+        // difference once mapped onto a boulder's actual on-screen size, so
+        // it read as unchanged. These values are roughly double that, which
+        // should stay clearly visible after the same downscale.
+        const off = 3.5;
 
-        // slim warm halo underneath, then a thin dark groove core on top —
-        // the base carved line, shaded below on top of it.
+        // wide warm halo underneath, then a dark groove core on top — the
+        // base carved line, shaded below on top of it.
         ctx.strokeStyle = 'rgba(58,10,0,0.9)';
-        ctx.lineWidth = 6.5;
+        ctx.lineWidth = 12;
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
 
         ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 5.5;
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
@@ -606,16 +611,16 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         // shadow side — drawn ON TOP of the halo/core (not under it) so it
         // actually reads as a dark rim cut into the rock instead of being
         // buried under the wider fill beneath it
-        ctx.strokeStyle = 'rgba(0,0,0,0.92)';
-        ctx.lineWidth = 2.3;
+        ctx.strokeStyle = 'rgba(0,0,0,0.95)';
+        ctx.lineWidth = 4;
         ctx.beginPath();
         ctx.moveTo(p0.x - nx*off, p0.y - ny*off);
         ctx.lineTo(p1.x - nx*off, p1.y - ny*off);
         ctx.stroke();
 
         // highlight side — the wall facing CRACK_LIGHT_DIR, also on top
-        ctx.strokeStyle = 'rgba(158,161,166,0.8)';
-        ctx.lineWidth = 1.9;
+        ctx.strokeStyle = 'rgba(158,161,166,0.85)';
+        ctx.lineWidth = 3.2;
         ctx.beginPath();
         ctx.moveTo(p0.x + nx*off, p0.y + ny*off);
         ctx.lineTo(p1.x + nx*off, p1.y + ny*off);
@@ -662,6 +667,7 @@ function makeCrackGlowTexture(seed, paths){
   const midC0  = [0x46,0x04,0x00], midC1  = [0x64,0x0a,0x00];
   const coreC0 = [0x6e,0x0a,0x00], coreC1 = [0xa0,0x1a,0x04];
   const distWidth = 13; // widest layer below — the reveal mask matches this so no layer gets clipped
+  const widthSteps = 10; // ring count for the width-based thickness reveal, below
   for (const pts of paths) {
     for (let i = 1; i < pts.length; i++) {
       const p0 = pts[i-1], p1 = pts[i];
@@ -685,22 +691,26 @@ function makeCrackGlowTexture(seed, paths){
       colorCtx.lineWidth = 2.2;
       colorCtx.beginPath(); colorCtx.moveTo(p0.x, p0.y); colorCtx.lineTo(p1.x, p1.y); colorCtx.stroke();
 
-      // distance is baked as a gradient along each segment (from p0.d to
-      // p1.d) rather than one flat value at the segment's midpoint — a flat
-      // per-segment value made the whole segment reveal at once the instant
-      // the fill level crossed its single threshold, stepping between
-      // joints instead of sweeping continuously along the crack.
-      const d0Byte = Math.max(1, Math.round(p0.d*255));
-      const d1Byte = Math.max(1, Math.round(p1.d*255));
-      const distGrad = distCtx.createLinearGradient(p0.x, p0.y, p1.x, p1.y);
-      distGrad.addColorStop(0, `rgb(${d0Byte},${d0Byte},${d0Byte})`);
-      distGrad.addColorStop(1, `rgb(${d1Byte},${d1Byte},${d1Byte})`);
-      distCtx.strokeStyle = distGrad;
-      distCtx.lineWidth = distWidth; distCtx.lineCap = 'round'; distCtx.lineJoin = 'round';
-      distCtx.beginPath();
-      distCtx.moveTo(p0.x, p0.y);
-      distCtx.lineTo(p1.x, p1.y);
-      distCtx.stroke();
+      // "distance" here is no longer position along the path — it's
+      // perpendicular distance from the crack's own centerline, baked as
+      // concentric rings from widest (outer edge, highest value) drawn
+      // first down to the thinnest (centerline, lowest value) drawn last on
+      // top. Every point along the ENTIRE crack network gets the same ring
+      // values regardless of where it sits along the path, so the reveal
+      // threshold uncovers a thin line down the whole crack at once, then
+      // widens uniformly outward — a "filling up in thickness" animation
+      // instead of one that travels along the path.
+      distCtx.lineCap = 'round'; distCtx.lineJoin = 'round';
+      for (let s = widthSteps; s >= 1; s--) {
+        const t = s / widthSteps;
+        const byte = Math.max(1, Math.round(t * 255));
+        distCtx.strokeStyle = `rgb(${byte},${byte},${byte})`;
+        distCtx.lineWidth = distWidth * t;
+        distCtx.beginPath();
+        distCtx.moveTo(p0.x, p0.y);
+        distCtx.lineTo(p1.x, p1.y);
+        distCtx.stroke();
+      }
     }
   }
 
@@ -863,7 +873,7 @@ boulderMaterial.onBeforeCompile = (shader) => {
       vec3 crackGlowColor = texture2D(uCrackGlowColorAtlas, vAtlasUv).rgb;
       float crackDist = texture2D(uCrackGlowDistAtlas, vAtlasUv).r;
       float crackShow = step(0.0002, crackDist) * step(crackDist, vFillLevel);
-      totalEmissiveRadiance += crackGlowColor * crackShow * 1.6;`);
+      totalEmissiveRadiance += crackGlowColor * crackShow * 1.75;`);
 };
 
 const boulderMesh = new THREE.InstancedMesh(boulderGeo, boulderMaterial, boulderDefs.length);
@@ -953,9 +963,9 @@ function updateBoulderHeat(dt){
   for (let i = activeCracks.length - 1; i >= 0; i--) {
     const c = activeCracks[i];
     const elapsed = (now - c.startTime) / 1000;
-    const fillDur  = 6.0;
-    const holdDur  = 2.0;
-    const drainDur = 8.0;
+    const fillDur  = 8.5;
+    const holdDur  = 2.5;
+    const drainDur = 9.5;
     let level = FILL_REST;
     if (elapsed < fillDur) {
       const t = elapsed / fillDur;
