@@ -587,23 +587,25 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         // on this boulder, instead of flipping with each segment's own
         // travel direction.
         if (nx*CRACK_LIGHT_DIR.x + ny*CRACK_LIGHT_DIR.y < 0) { nx = -nx; ny = -ny; }
-        // Widened substantially from the prior pass — at the 256px atlas
-        // cell's resolution, that increase (~5→6.5px) shrank to a sub-pixel
-        // difference once mapped onto a boulder's actual on-screen size, so
-        // it read as unchanged. These values are roughly double that, which
-        // should stay clearly visible after the same downscale.
-        const off = 3.5;
+        // Pixel-sampled after the prior pass: the dark core/shadow trough
+        // was landing with real contrast (~20 vs ~55 base rock — confirmed
+        // via gl.readPixels), but the highlight stroke's rendered brightness
+        // (~55) was barely above the surrounding rock's own natural noise
+        // range, so it never read as a distinct lit edge — just more of the
+        // same dark trough with no visible "far wall". Pushed much brighter/
+        // more opaque here, plus widened further across the board.
+        const off = 4.5;
 
         // wide warm halo underneath, then a dark groove core on top — the
         // base carved line, shaded below on top of it.
         ctx.strokeStyle = 'rgba(58,10,0,0.9)';
-        ctx.lineWidth = 12;
+        ctx.lineWidth = 16;
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
 
         ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 5.5;
+        ctx.lineWidth = 7.5;
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
@@ -611,16 +613,18 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         // shadow side — drawn ON TOP of the halo/core (not under it) so it
         // actually reads as a dark rim cut into the rock instead of being
         // buried under the wider fill beneath it
-        ctx.strokeStyle = 'rgba(0,0,0,0.95)';
-        ctx.lineWidth = 4;
+        ctx.strokeStyle = 'rgba(0,0,0,0.96)';
+        ctx.lineWidth = 5;
         ctx.beginPath();
         ctx.moveTo(p0.x - nx*off, p0.y - ny*off);
         ctx.lineTo(p1.x - nx*off, p1.y - ny*off);
         ctx.stroke();
 
-        // highlight side — the wall facing CRACK_LIGHT_DIR, also on top
-        ctx.strokeStyle = 'rgba(158,161,166,0.85)';
-        ctx.lineWidth = 3.2;
+        // highlight side — the wall facing CRACK_LIGHT_DIR, also on top.
+        // Much brighter/more opaque than before so it actually contrasts
+        // against ordinary rock texture instead of blending into it.
+        ctx.strokeStyle = 'rgba(226,229,233,0.97)';
+        ctx.lineWidth = 4;
         ctx.beginPath();
         ctx.moveTo(p0.x + nx*off, p0.y + ny*off);
         ctx.lineTo(p1.x + nx*off, p1.y + ny*off);
@@ -666,11 +670,28 @@ function makeCrackGlowTexture(seed, paths){
   const haloC0 = [0x28,0x02,0x00], haloC1 = [0x46,0x06,0x00];
   const midC0  = [0x46,0x04,0x00], midC1  = [0x64,0x0a,0x00];
   const coreC0 = [0x6e,0x0a,0x00], coreC1 = [0xa0,0x1a,0x04];
-  const distWidth = 13; // widest layer below — the reveal mask matches this so no layer gets clipped
+  const distWidth = 16; // widest layer below — the reveal mask matches this so no layer gets clipped
   const widthSteps = 10; // ring count for the width-based thickness reveal, below
+  // Shift the whole glow off the raw path centerline, toward the same side
+  // the static groove's shadow trough sits on (see CRACK_LIGHT_DIR / the
+  // shadow offset in makeBoulderTexture) — previously the glow was centered
+  // exactly on the centerline, independent of where the groove's actual
+  // dark trough was, so it read as a separate bright line floating over the
+  // rock rather than light coming from inside the carved channel. Offsetting
+  // it to sit inside that trough (with the groove's highlight edge, offset
+  // to the opposite side, left outside the glow's reach) makes the fill
+  // look like it's welling up inside the groove instead of sitting on it.
+  const glowOff = 2.0;
   for (const pts of paths) {
     for (let i = 1; i < pts.length; i++) {
       const p0 = pts[i-1], p1 = pts[i];
+      const dx = p1.x - p0.x, dy = p1.y - p0.y;
+      const segLen = Math.sqrt(dx*dx + dy*dy) || 1;
+      let nx = -dy/segLen, ny = dx/segLen;
+      if (nx*CRACK_LIGHT_DIR.x + ny*CRACK_LIGHT_DIR.y < 0) { nx = -nx; ny = -ny; }
+      const gx0 = p0.x - nx*glowOff, gy0 = p0.y - ny*glowOff;
+      const gx1 = p1.x - nx*glowOff, gy1 = p1.y - ny*glowOff;
+
       const dAvg = (p0.d + p1.d) * 0.5;
       const mix3 = (c0, c1) => c0.map((v, k) => Math.round(v + (c1[k]-v)*dAvg));
 
@@ -679,17 +700,17 @@ function makeCrackGlowTexture(seed, paths){
       const [hr,hg,hb] = mix3(haloC0, haloC1);
       colorCtx.strokeStyle = `rgba(${hr},${hg},${hb},0.6)`;
       colorCtx.lineWidth = distWidth;
-      colorCtx.beginPath(); colorCtx.moveTo(p0.x, p0.y); colorCtx.lineTo(p1.x, p1.y); colorCtx.stroke();
+      colorCtx.beginPath(); colorCtx.moveTo(gx0, gy0); colorCtx.lineTo(gx1, gy1); colorCtx.stroke();
 
       const [mr,mg,mb] = mix3(midC0, midC1);
       colorCtx.strokeStyle = `rgb(${mr},${mg},${mb})`;
-      colorCtx.lineWidth = 7;
-      colorCtx.beginPath(); colorCtx.moveTo(p0.x, p0.y); colorCtx.lineTo(p1.x, p1.y); colorCtx.stroke();
+      colorCtx.lineWidth = 9;
+      colorCtx.beginPath(); colorCtx.moveTo(gx0, gy0); colorCtx.lineTo(gx1, gy1); colorCtx.stroke();
 
       const [cr,cg,cb] = mix3(coreC0, coreC1);
       colorCtx.strokeStyle = `rgb(${cr},${cg},${cb})`;
-      colorCtx.lineWidth = 2.2;
-      colorCtx.beginPath(); colorCtx.moveTo(p0.x, p0.y); colorCtx.lineTo(p1.x, p1.y); colorCtx.stroke();
+      colorCtx.lineWidth = 3;
+      colorCtx.beginPath(); colorCtx.moveTo(gx0, gy0); colorCtx.lineTo(gx1, gy1); colorCtx.stroke();
 
       // "distance" here is no longer position along the path — it's
       // perpendicular distance from the crack's own centerline, baked as
@@ -707,8 +728,8 @@ function makeCrackGlowTexture(seed, paths){
         distCtx.strokeStyle = `rgb(${byte},${byte},${byte})`;
         distCtx.lineWidth = distWidth * t;
         distCtx.beginPath();
-        distCtx.moveTo(p0.x, p0.y);
-        distCtx.lineTo(p1.x, p1.y);
+        distCtx.moveTo(gx0, gy0);
+        distCtx.lineTo(gx1, gy1);
         distCtx.stroke();
       }
     }
@@ -873,7 +894,7 @@ boulderMaterial.onBeforeCompile = (shader) => {
       vec3 crackGlowColor = texture2D(uCrackGlowColorAtlas, vAtlasUv).rgb;
       float crackDist = texture2D(uCrackGlowDistAtlas, vAtlasUv).r;
       float crackShow = step(0.0002, crackDist) * step(crackDist, vFillLevel);
-      totalEmissiveRadiance += crackGlowColor * crackShow * 1.75;`);
+      totalEmissiveRadiance += crackGlowColor * crackShow * 2.4;`);
 };
 
 const boulderMesh = new THREE.InstancedMesh(boulderGeo, boulderMaterial, boulderDefs.length);
