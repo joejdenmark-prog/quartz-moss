@@ -354,10 +354,13 @@ scatterTier(1.30, 0.16, 0.75, 1.45, 0.62); // large
 scatterTier(0.62, 0.12, 0.45, 0.75, 0.68); // medium
 
 // ── Boulder shape — heavily-jittered sphere reads as an irregular lumpy
-// rock; flat shading (see boulderMaterial below) makes each facet read as
-// its own flat plane against the texture, avoiding UV-stretch distortion
-// across curved surfaces.
-const boulderGeo = new THREE.SphereGeometry(1, 12, 9);
+// rock. Segments raised from 12x9 — smooth shading (see boulderMaterial
+// below) alone wasn't enough to stop the mesh reading as angular panels,
+// since normal interpolation only smooths lighting across a triangle, not
+// the triangle's own size; at 12x9 each face was large enough to still read
+// as a distinct flat plane, especially at the silhouette. More, smaller
+// faces round out both the lit surface and the outline.
+const boulderGeo = new THREE.SphereGeometry(1, 18, 14);
 {
   const jrng = mulberry32(0x9e3b7a);
   const pos = boulderGeo.attributes.position;
@@ -879,12 +882,18 @@ boulderMaterial.onBeforeCompile = (shader) => {
       vec3 texRaw = texture2D(uBoulderAtlas, vAtlasUv).rgb;
       diffuseColor.rgb = texRaw;`)
     .replace('#include <lights_fragment_begin>', `#include <lights_fragment_begin>
-      // pull down this material's response to ambient/hemisphere skylight
-      // specifically — not the direct sun/fill/rim lights below, which still
-      // light each facet and give the pits/cracks their readable contrast —
-      // so shadowed rock can settle much closer to true black instead of
-      // being lifted by a flat ambient wash.
-      reflectedLight.indirectDiffuse *= 0.12;`)
+      // pull down this material's response to ambient/hemisphere skylight.
+      reflectedLight.indirectDiffuse *= 0.12;
+      // Also pull down the DIRECT sun/fill/rim response — previously left
+      // alone on the theory it was needed for facet/crack contrast, but
+      // pixel-sampled after the ambient-only cut: well-lit facets were
+      // still hitting ~150/255, nowhere near black, because these direct
+      // lights (not ambient) were the dominant remaining brightness source.
+      // Scaling rather than zeroing keeps relative facet-to-facet contrast
+      // (and the crack shadow/highlight baked into the texture) intact,
+      // just at a much darker overall ceiling.
+      reflectedLight.directDiffuse *= 0.32;
+      reflectedLight.directSpecular *= 0.32;`)
     .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
       float h = clamp(vHeat, 0.0, 1.0);
       vec3 riverGlowColor = vec3(0.48,0.055,0.03);
