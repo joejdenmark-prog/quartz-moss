@@ -992,7 +992,12 @@ function updateBoulderHeat(dt){
     let level = FILL_REST;
     if (elapsed < fillDur) {
       const t = elapsed / fillDur;
-      level = t*t*(3.0 - 2.0*t); // smoothstep ease — creeps in rather than a linear rush
+      // cubic ease-out — was smoothstep, which has a flat tangent at t=0 and
+      // stays under the width-reveal's visibility threshold for close to a
+      // second, reading as a startup delay after the tap. This ramps up
+      // immediately from the first frame, still decelerating into the hold
+      // rather than a linear/instant snap.
+      level = 1.0 - Math.pow(1.0 - t, 3);
     } else if (elapsed < fillDur + holdDur) {
       level = 1.0;
     } else if (elapsed < fillDur + holdDur + drainDur) {
@@ -1305,6 +1310,11 @@ canvas.addEventListener('pointerdown', (e) => {
     boulderDownTime = performance.now();
     boulderDownX = e.clientX; boulderDownY = e.clientY;
     lastBoulderHitPoint.copy(hit.point);
+    // Fire immediately on touch rather than waiting for release — triggering
+    // on pointerup added the tap's own hold duration (up to HOLD_MS) as a
+    // felt delay before the fill ever started.
+    handleBoulderTap(hit.instanceId);
+    triggerCrack(hit.instanceId, hit.point);
     return;
   }
   const riverHit = pickRiver(e);
@@ -1345,12 +1355,7 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 function releasePointer(e){
-  const elapsed = performance.now() - boulderDownTime;
   clearTimeout(holdTimer);
-  if (boulderDownId !== null && elapsed < HOLD_MS) {
-    handleBoulderTap(boulderDownId);
-    triggerCrack(boulderDownId, lastBoulderHitPoint);
-  }
   boulderDownId = null;
   const slot = dragSlots.find(s => s.pointerId === e.pointerId);
   if (slot) { slot.active = false; slot.pointerId = null; }
