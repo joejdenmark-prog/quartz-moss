@@ -497,82 +497,77 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
   const ctx = cnv.getContext('2d');
   const trng = mulberry32(seed >>> 0);
 
-  ctx.fillStyle = '#070708';
+  ctx.fillStyle = '#08080a';
   ctx.fillRect(0, 0, size, size);
 
-  // broad tonal variation — soft overlapping blotches simulate mineral/
-  // density variation in real volcanic rock, giving the surface a layered,
-  // uneven depth instead of reading as one flat base fill before the finer
-  // pore/speckle detail below is added on top.
-  const blotchCount = 10 + Math.floor(trng()*8);
-  for (let i = 0; i < blotchCount; i++) {
-    const bx = trng()*size, by = trng()*size, r = 28 + trng()*48;
-    const dark = trng() > 0.5;
-    const rgb = dark ? '2,2,3' : '20,21,22';
-    const grad = ctx.createRadialGradient(bx, by, 0, bx, by, r);
-    grad.addColorStop(0, `rgba(${rgb},${(0.35 + trng()*0.25).toFixed(2)})`);
-    grad.addColorStop(1, `rgba(${rgb},0)`);
-    ctx.fillStyle = grad;
-    ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI*2); ctx.fill();
+  // cheap multi-frequency pseudo-noise (no dependencies) for organic,
+  // non-repeating bumpiness within a plate — several sine/cosine terms at
+  // different frequencies/phases combine into something far less regular
+  // than a single wave, roughly spanning -1..1.
+  function bumpNoise(x, y) {
+    const n1 = Math.sin(x*0.15 + seed*0.00071) * Math.cos(y*0.13 - seed*0.00043);
+    const n2 = Math.sin(x*0.37 + y*0.29 + seed*0.00097) * 0.5;
+    const n3 = Math.sin((x + y*1.7) * 0.06 + seed*0.00061) * 0.35;
+    return (n1 + n2 + n3) / 1.85;
   }
 
-  // organic porosity map — a few cluster centers where pitting concentrates
-  // heavily, and a few smoother patches where it thins out, so the pits/
-  // specks/grain below read as uneven weathering instead of a uniform
-  // repeating grain.
-  const clusterCount = 3 + Math.floor(trng()*3);
-  const clusters = [];
-  for (let i = 0; i < clusterCount; i++) {
-    clusters.push({ x: trng()*size, y: trng()*size, r: 40 + trng()*70, density: 0.6 + trng()*1.3 });
-  }
-  const smoothCount = 1 + Math.floor(trng()*2);
-  const smoothPatches = [];
-  for (let i = 0; i < smoothCount; i++) {
-    smoothPatches.push({ x: trng()*size, y: trng()*size, r: 30 + trng()*40 });
-  }
-  function porosity(x, y) {
-    let w = 0.35;
-    for (const c of clusters) {
-      const d = Math.hypot(x - c.x, y - c.y);
-      if (d < c.r) w += c.density * (1 - d / c.r);
-    }
-    for (const s of smoothPatches) {
-      const d = Math.hypot(x - s.x, y - s.y);
-      if (d < s.r) w *= 0.15 + 0.6 * (d / s.r);
-    }
-    return w;
+  // Large irregular cracked plate/slab shapes (a coarse Voronoi cellular
+  // pattern) instead of a dot/pit scatter — each plate is a flat region
+  // around its own seed point, its own near-black shade, with a darker seam
+  // painted along the boundary where two plates meet, plus subtle per-pixel
+  // bumpiness within it. Every tone here stays dark (well under a fifth of
+  // full brightness) — no white/gray anywhere — but the spread between
+  // plate and seam is kept wide within that dark range: this scene's
+  // ambient lighting is already pulled down (see boulderMaterial's onBefore-
+  // Compile), so a narrower raw contrast here was getting crushed to a flat
+  // black on the actual boulder even though the baked texture itself was
+  // fine — confirmed by rendering the raw canvas directly, outside the 3D
+  // pipeline, during testing.
+  const plateCount = 7 + Math.floor(trng()*7); // 7-13 large plates
+  const plates = [];
+  for (let i = 0; i < plateCount; i++) {
+    plates.push({ x: trng()*size, y: trng()*size, shade: 22 + trng()*48 });
   }
 
-  // porous surface: scattered dark pits, clustered and size-varied rather
-  // than an even scatter, with fewer/smaller pits in the smoother patches
-  const pitAttempts = 1400;
-  for (let i = 0; i < pitAttempts; i++) {
-    const x = trng()*size, y = trng()*size;
-    if (trng() > porosity(x, y) * 0.5) continue;
-    const r = 1.5 + trng()*4.5;
-    ctx.fillStyle = '#010102';
-    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
-  }
-  // highlight spots catching light, following the same porosity map
-  const highlightAttempts = 260;
-  for (let i = 0; i < highlightAttempts; i++) {
-    const x = trng()*size, y = trng()*size;
-    if (trng() > porosity(x, y) * 0.4) continue;
-    const r = 2 + trng()*6;
-    ctx.fillStyle = '#282a2c';
-    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
-  }
-  // fine noise grain simulating the micro-texture of volcanic rock, thinned
-  // out inside the smoother patches so they read calmer than the rest
-  const noiseCount = 1000;
-  for (let i = 0; i < noiseCount; i++) {
-    const x = trng()*size, y = trng()*size;
-    let inSmooth = false;
-    for (const s of smoothPatches) {
-      if (Math.hypot(x - s.x, y - s.y) < s.r) { inSmooth = true; break; }
+  const grid = 160; // sampled on a coarser grid than the 256px canvas, drawn as small blocks — cheap, one-time bake cost
+  const cell = size / grid;
+  const seamReach = cell * 3.4; // how wide the darkened seam band is, in gap-to-next-plate terms
+  for (let gy = 0; gy < grid; gy++) {
+    for (let gx = 0; gx < grid; gx++) {
+      const px = (gx + 0.5) * cell, py = (gy + 0.5) * cell;
+      let best = Infinity, second = Infinity, bestIdx = 0;
+      for (let p = 0; p < plates.length; p++) {
+        const dx = px - plates[p].x, dy = py - plates[p].y;
+        const d = dx*dx + dy*dy;
+        if (d < best) { second = best; best = d; bestIdx = p; }
+        else if (d < second) { second = d; }
+      }
+      const gap = Math.sqrt(second) - Math.sqrt(best);
+
+      let shade = plates[bestIdx].shade + bumpNoise(px, py) * 5;
+      if (gap < seamReach) {
+        // interpolate toward a near-black floor at the exact boundary,
+        // rather than subtracting a capped amount — a subtraction still
+        // left brighter plates with a lighter seam than darker plates,
+        // which diluted the contrast this pipeline's dim ambient light
+        // needs to keep the seam reliably readable against any plate.
+        const t = 1 - gap / seamReach;
+        shade = shade * (1 - t) + 2 * t;
+      }
+      shade = Math.max(1, Math.min(70, Math.round(shade)));
+
+      ctx.fillStyle = `rgb(${shade},${shade},${shade + 1})`;
+      ctx.fillRect(gx*cell, gy*cell, cell + 1, cell + 1); // +1 so our own blocks don't leave seams against each other
     }
-    if (inSmooth && trng() > 0.4) continue;
-    ctx.fillStyle = i % 2 === 0 ? '#020203' : '#161718';
+  }
+
+  // fine per-pixel grain on top for close-up micro-texture — always dark,
+  // low-alpha so it reads as rough grain rather than added speckle dots.
+  const grainCount = 2200;
+  for (let i = 0; i < grainCount; i++) {
+    const x = trng()*size, y = trng()*size;
+    const v = 2 + Math.floor(trng()*8);
+    ctx.fillStyle = `rgba(${v},${v},${v+1},${(0.15 + trng()*0.25).toFixed(2)})`;
     ctx.fillRect(x, y, 1, 1);
   }
 
