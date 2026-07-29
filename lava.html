@@ -783,6 +783,11 @@ visibleBoulderIdx.forEach((idx, n) => {
   // the exact same crack shape — not just two independently-seeded calls
   // that happen to agree.
   const crackPaths = generateCrackPaths(seed ^ 0x51ed270b, ATLAS_CELL/2, ATLAS_CELL/2, ATLAS_CELL*0.6);
+  // Boulder 881's crack network happened to include one branch that renders
+  // as a single straight/unbroken line, out of place among the intentionally
+  // jagged fracture patterns — this boulder already has several other
+  // cracks, so the branch is dropped rather than replaced.
+  if (idx === 881) crackPaths.splice(2, 1);
   atlasCtx.drawImage(makeBoulderTexture(seed, true, crackPaths).image, col*ATLAS_CELL, row*ATLAS_CELL);
   const glow = makeCrackGlowTexture(seed, crackPaths);
   glowColorAtlasCtx.drawImage(glow.colorCnv, col*ATLAS_CELL, row*ATLAS_CELL);
@@ -909,6 +914,17 @@ boulderMaterial.onBeforeCompile = (shader) => {
       // on top of both, unconditionally, wherever a boulder faces the lava.
       vec3 riverGlowColor = vec3(0.48,0.055,0.03);
       totalEmissiveRadiance += riverGlowColor * vRiverGlow * vRiverFacing * 0.15;
+      // subtle warm rim light along every boulder's silhouette — reuses the
+      // same riverGlowColor as the river-adjacency glow above rather than
+      // introducing a separate color/system, just driven by view angle
+      // (a view-angle Fresnel term) instead of distance to the river. Since
+      // neighboring boulders sit close together, this also naturally lights
+      // up the dark gaps/crevices between them (that's exactly where each
+      // boulder's silhouette edge faces the camera). Sharp falloff (pow 4)
+      // and a low multiplier keep it a thin edge highlight, not a body glow.
+      vec3 rimViewDir = normalize(vViewPosition);
+      float rim = pow(clamp(1.0 - max(dot(normalize(normal), rimViewDir), 0.0), 0.0, 1.0), 4.0);
+      totalEmissiveRadiance += riverGlowColor * rim * 0.09;
       // baseline visibility floor, lowered further — this and the reduced
       // indirectDiffuse above were still adding up to a flat gray wash that
       // dominated over the plate texture's own (now wide) contrast, so
