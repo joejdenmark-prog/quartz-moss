@@ -748,7 +748,21 @@ function makeCrackGlowTexture(seed, paths){
   return { colorCnv, distCnv };
 }
 
-const VISIBLE_X = 4.62;
+// Was a fixed guess (4.62), tuned against whatever aspect ratio happened to
+// get tested. The camera's actual horizontal half-width scales with the
+// real device/viewport aspect ratio (camera.right = (W/H)*ORTHO_H, set
+// above) — on a wider-than-tested ratio (e.g. an iPhone SE's more square
+// 375x667 screen, W/H≈0.56, vs. a taller iPhone's ≈0.46), the camera
+// genuinely shows boulders further out than a fixed 4.62 covers. Those
+// boulders would fall outside this eligibility check despite being visibly
+// on screen, rendering with the shared generic (uncracked, non-interactive)
+// texture — exactly the "boulder has no crack and doesn't respond to taps
+// on some devices" symptom. Deriving this from the actual camera bounds
+// plus a margin (comfortably more than the largest boulder radius, so a
+// boulder just past the frustum edge but still partly visible still
+// qualifies) makes it correct for whatever the real viewport turns out to
+// be, instead of a guess tuned to one aspect ratio.
+const VISIBLE_X = camera.right + 1.5;
 const visibleBoulderIdx = [];
 boulderDefs.forEach((b, i) => { if (Math.abs(b.x) <= VISIBLE_X && Math.abs(b.z) <= ORTHO_H) visibleBoulderIdx.push(i); });
 
