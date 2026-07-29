@@ -123,12 +123,6 @@ function handleViewportResize(){
     camera.bottom = -ORTHO_H;
     camera.updateProjectionMatrix();
     renderer.setSize(W, H);
-    // A resize/orientation change can bring previously out-of-frame boulders
-    // into view — make sure they get real crack textures too, not just
-    // whatever was baked at initial load. ensureVisibleBouldersBaked is
-    // declared later in the file as a function declaration (hoisted), and is
-    // only ever actually called once its own setup has completed.
-    if (typeof ensureVisibleBouldersBaked === 'function') ensureVisibleBouldersBaked();
   }, 250);
 }
 window.addEventListener('resize', handleViewportResize);
@@ -754,27 +748,27 @@ function makeCrackGlowTexture(seed, paths){
   return { colorCnv, distCnv };
 }
 
-// Two rounds of trying to estimate "which boulders are visible" (a fixed
-// guess, then one derived from camera.right) both still missed a boulder on
-// a real device — any such cutoff is fragile because it has to be computed
-// correctly for whatever the real viewport turns out to be, at the exact
-// moment it's measured. Instead, every boulder is eligible for a real baked
-// texture, assigned lazily/on demand: nothing is baked upfront for boulders
-// that are nowhere near the camera (baking is too slow and the resulting
-// atlas far too large to do for all ~2800 boulders in the scene at once —
-// confirmed by timing it: ~23ms/boulder, and a full-scene atlas would need
-// a 13000+px texture), but ensureVisibleBouldersBaked() (below) re-checks
-// the ACTUAL, current camera bounds — not an estimate — on every resize and
-// on a standing timer, so any boulder that's ever really on screen gets a
-// real crack texture and tap-fill capability, self-healing even if an
-// earlier check ran before the device's viewport had fully settled.
+// Was a fixed guess (4.62), tuned against whatever aspect ratio happened to
+// get tested. The camera's actual horizontal half-width scales with the
+// real device/viewport aspect ratio (camera.right = (W/H)*ORTHO_H, set
+// above) — on a wider-than-tested ratio (e.g. an iPhone SE's more square
+// 375x667 screen, W/H≈0.56, vs. a taller iPhone's ≈0.46), the camera
+// genuinely shows boulders further out than a fixed 4.62 covers. Those
+// boulders would fall outside this eligibility check despite being visibly
+// on screen, rendering with the shared generic (uncracked, non-interactive)
+// texture — exactly the "boulder has no crack and doesn't respond to taps
+// on some devices" symptom. Deriving this from the actual camera bounds
+// plus a margin (comfortably more than the largest boulder radius, so a
+// boulder just past the frustum edge but still partly visible still
+// qualifies) makes it correct for whatever the real viewport turns out to
+// be, instead of a guess tuned to one aspect ratio.
+const VISIBLE_X = camera.right + 1.5;
+const visibleBoulderIdx = [];
+boulderDefs.forEach((b, i) => { if (Math.abs(b.x) <= VISIBLE_X && Math.abs(b.z) <= ORTHO_H) visibleBoulderIdx.push(i); });
+
 const ATLAS_CELL = 256;
-// 15x15 = 225 cells (224 usable boulders + the shared generic cell) — a
-// generous ceiling for how many boulders could plausibly be on screen at
-// once on a phone-shaped viewport in either orientation, sized to comfortably
-// avoid ever hitting the cap in practice while keeping the atlas (and the
-// one-time bake cost for whatever's actually in view) reasonable.
-const atlasCols = 15, atlasRows = 15;
+const atlasCols = Math.max(1, Math.ceil(Math.sqrt(visibleBoulderIdx.length + 1)));
+const atlasRows = Math.max(1, Math.ceil((visibleBoulderIdx.length + 1) / atlasCols));
 const atlasCanvas = document.createElement('canvas');
 atlasCanvas.width = atlasCols * ATLAS_CELL; atlasCanvas.height = atlasRows * ATLAS_CELL;
 const atlasCtx = atlasCanvas.getContext('2d');
@@ -788,25 +782,14 @@ const glowDistAtlasCanvas = document.createElement('canvas');
 glowDistAtlasCanvas.width = atlasCols * ATLAS_CELL; glowDistAtlasCanvas.height = atlasRows * ATLAS_CELL;
 const glowDistAtlasCtx = glowDistAtlasCanvas.getContext('2d');
 
-const atlasOffsetArray = new Float32Array(boulderDefs.length * 2); // defaults to (0,0) — cell 0, the shared generic texture, until baked
+const atlasOffsetArray = new Float32Array(boulderDefs.length * 2); // defaults to (0,0) — cell 0, the shared generic texture
 const cellUvW = 1 / atlasCols, cellUvH = 1 / atlasRows;
 
-// cell 0 — shared generic texture, the starting look for every boulder
-// until it's actually baked (below)
+// cell 0 — shared generic texture for every boulder outside the viewport
 atlasCtx.drawImage(makeBoulderTexture(0x2c3e50, false).image, 0, 0);
 
-const bakedBoulderIds = new Set();
-let nextAtlasCell = 1; // cell 0 is reserved for the shared generic texture
-
-// Bakes one boulder's real crack texture + glow into the next free atlas
-// cell. Pure bookkeeping/canvas work only — callers are responsible for
-// flagging the resulting textures/attribute for a GPU re-upload once done,
-// since that's only valid/needed after they actually exist (see
-// ensureVisibleBouldersBaked below).
-function bakeBoulderIntoAtlas(idx){
-  if (bakedBoulderIds.has(idx)) return false;
-  if (nextAtlasCell >= atlasCols * atlasRows) return false; // capacity exhausted — shouldn't happen in practice at this size
-  const cellIndex = nextAtlasCell++;
+visibleBoulderIdx.forEach((idx, n) => {
+  const cellIndex = n + 1; // cell 0 is reserved for the shared generic texture
   const col = cellIndex % atlasCols, row = Math.floor(cellIndex / atlasCols);
   const seed = idx * CRACK_SEED_SALT + 13;
   // Generated once per boulder and passed into both bakers below, so the
@@ -825,9 +808,7 @@ function bakeBoulderIntoAtlas(idx){
   glowDistAtlasCtx.drawImage(glow.distCnv, col*ATLAS_CELL, row*ATLAS_CELL);
   atlasOffsetArray[idx*2] = col * cellUvW;
   atlasOffsetArray[idx*2+1] = row * cellUvH;
-  bakedBoulderIds.add(idx);
-  return true;
-}
+});
 
 const boulderAtlasTex = new THREE.CanvasTexture(atlasCanvas);
 boulderAtlasTex.needsUpdate = true;
@@ -1014,38 +995,6 @@ boulderGeo.setAttribute('aRiverSide', new THREE.InstancedBufferAttribute(riverSi
 boulderGeo.setAttribute('aAtlasOffset', new THREE.InstancedBufferAttribute(atlasOffsetArray, 2));
 boulderGeo.setAttribute('aFillLevel', new THREE.InstancedBufferAttribute(fillLevelArray, 1));
 scene.add(boulderMesh);
-
-// Scans every boulder against the camera's ACTUAL current bounds (not an
-// estimate) and bakes a real crack texture for any that are on screen but
-// still showing the generic fallback. Cheap to call often — the scan itself
-// is a few thousand simple comparisons; the (much pricier, ~20ms each) bake
-// work only ever runs once per boulder, the first time it's found on screen.
-function ensureVisibleBouldersBaked(){
-  const margin = 1.5; // boulder-radius headroom, so one just past the exact frustum edge still qualifies
-  const xLimit = camera.right + margin, zLimit = camera.top + margin;
-  let anyBaked = false;
-  for (let i = 0; i < boulderDefs.length; i++) {
-    if (bakedBoulderIds.has(i)) continue;
-    const b = boulderDefs[i];
-    if (Math.abs(b.x) <= xLimit && Math.abs(b.z) <= zLimit) {
-      if (bakeBoulderIntoAtlas(i)) anyBaked = true;
-    }
-  }
-  if (anyBaked) {
-    boulderAtlasTex.needsUpdate = true;
-    crackGlowColorAtlasTex.needsUpdate = true;
-    crackGlowDistAtlasTex.needsUpdate = true;
-    boulderGeo.attributes.aAtlasOffset.needsUpdate = true;
-  }
-  return anyBaked;
-}
-ensureVisibleBouldersBaked();
-// Self-heal: a device's viewport/camera bounds can report slightly late on
-// first load (the exact failure mode that motivated removing the cutoff
-// estimate entirely) — a couple of delayed re-checks catch anything the
-// immediate pass above might have measured too early.
-setTimeout(ensureVisibleBouldersBaked, 300);
-setTimeout(ensureVisibleBouldersBaked, 1200);
 
 // ── Boulder crack system — per-instance fill level sweeps outward from the
 // tapped point through the baked crack-glow atlas, like molten lava surging
@@ -1489,7 +1438,6 @@ let fpsFrames = 0, fpsAccum = 0;
 
 // ── Render loop ───────────────────────────────────────────────────────────────
 const clock = new THREE.Clock();
-let boulderBakeCheckAccum = 0;
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
 
@@ -1503,17 +1451,6 @@ renderer.setAnimationLoop(() => {
   updateSmoke(dt);
   updateSplashes(dt);
 
-  // Ongoing safety net, on top of the resize hook and the delayed initial
-  // recheck: throttled to once a second so the steady-state cost is just an
-  // occasional cheap scan (see ensureVisibleBouldersBaked above) — catches
-  // any boulder that's ever on screen without a real crack texture yet,
-  // regardless of why the earlier checks might have missed it.
-  boulderBakeCheckAccum += dt;
-  if (boulderBakeCheckAccum >= 1.0) {
-    boulderBakeCheckAccum = 0;
-    ensureVisibleBouldersBaked();
-  }
-
   renderer.render(scene, camera);
 
   fpsFrames++; fpsAccum += dt;
@@ -1524,7 +1461,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future animation work ─────────────────────────────────
-window.__lava = { THREE, scene, camera, renderer, boulderMesh, boulderDefs, heatArray, fillLevelArray, triggerCrack, handleBoulderTap, dragSlots, dragQuadPool, activeCracks, bakedBoulderIds, ensureVisibleBouldersBaked };
+window.__lava = { THREE, scene, camera, renderer, boulderMesh, boulderDefs, heatArray, fillLevelArray, triggerCrack, handleBoulderTap, dragSlots, dragQuadPool, activeCracks };
 </script>
 </body>
 </html>
