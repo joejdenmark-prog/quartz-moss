@@ -353,19 +353,25 @@ function scatterTier(cell, riverBuffer, radiusMin, radiusMax, packFactor, xMin, 
 scatterTier(1.30, 0.16, 0.75, 1.45, 0.62); // large
 scatterTier(0.62, 0.12, 0.45, 0.75, 0.68); // medium
 
-// ── Boulder shape — heavily-jittered sphere reads as an irregular lumpy
-// rock. Segments raised from 12x9 — smooth shading (see boulderMaterial
-// below) alone wasn't enough to stop the mesh reading as angular panels,
+// ── Boulder shape — jittered sphere reads as an irregular lumpy rock.
+// Segments raised again (18x14 -> 22x16, a real, verified triangle-count
+// increase — see window.__lava.boulderMesh.geometry for confirmation).
+// Two things drive the faceted look, and both are addressed here: (1) large
+// triangles from too few segments — smooth shading alone can't fix that,
 // since normal interpolation only smooths lighting across a triangle, not
-// the triangle's own size; at 12x9 each face was large enough to still read
-// as a distinct flat plane, especially at the silhouette. More, smaller
-// faces round out both the lit surface and the outline.
-const boulderGeo = new THREE.SphereGeometry(1, 18, 14);
+// the triangle's own size; (2) the PER-VERTEX jitter below was applied
+// independently at each vertex with no correlation to its neighbors, which
+// put sharp, spiky steps in the surface itself, at any segment count. The
+// jitter magnitude is cut hard (0.65 -> 0.28) so the underlying shape is
+// smoother, letting a more moderate (cheaper) segment increase still read
+// as rounded rock instead of needing an even heavier, costlier tessellation
+// to visually fight through jagged vertex noise.
+const boulderGeo = new THREE.SphereGeometry(1, 22, 16);
 {
   const jrng = mulberry32(0x9e3b7a);
   const pos = boulderGeo.attributes.position;
   for (let i = 0; i < pos.count; i++) {
-    const jitter = 1 + (jrng() - 0.5) * 0.65;
+    const jitter = 1 + (jrng() - 0.5) * 0.28;
     pos.setXYZ(i, pos.getX(i)*jitter, pos.getY(i)*jitter, pos.getZ(i)*jitter);
   }
   pos.needsUpdate = true;
@@ -892,12 +898,17 @@ boulderMaterial.onBeforeCompile = (shader) => {
       // Scaling rather than zeroing keeps relative facet-to-facet contrast
       // (and the crack shadow/highlight baked into the texture) intact,
       // just at a much darker overall ceiling.
-      reflectedLight.directDiffuse *= 0.32;
-      reflectedLight.directSpecular *= 0.32;`)
+      reflectedLight.directDiffuse *= 0.13;
+      reflectedLight.directSpecular *= 0.13;`)
     .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
       float h = clamp(vHeat, 0.0, 1.0);
+      // river-adjacent rim glow — this warm additive term had never been
+      // scaled down in earlier passes, and was very likely why boulders on
+      // the light-facing / river-adjacent side of the scene stayed warm
+      // gray even after ambient and direct light were both cut: it stacks
+      // on top of both, unconditionally, wherever a boulder faces the lava.
       vec3 riverGlowColor = vec3(0.48,0.055,0.03);
-      totalEmissiveRadiance += riverGlowColor * vRiverGlow * vRiverFacing * 0.425;
+      totalEmissiveRadiance += riverGlowColor * vRiverGlow * vRiverFacing * 0.15;
       // baseline visibility floor, lowered further — this and the reduced
       // indirectDiffuse above were still adding up to a flat gray wash that
       // dominated over the plate texture's own (now wide) contrast, so
