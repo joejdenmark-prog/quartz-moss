@@ -748,23 +748,30 @@ function makeCrackGlowTexture(seed, paths){
   return { colorCnv, distCnv };
 }
 
-// Was a fixed guess (4.62), tuned against whatever aspect ratio happened to
-// get tested. The camera's actual horizontal half-width scales with the
-// real device/viewport aspect ratio (camera.right = (W/H)*ORTHO_H, set
-// above) — on a wider-than-tested ratio (e.g. an iPhone SE's more square
-// 375x667 screen, W/H≈0.56, vs. a taller iPhone's ≈0.46), the camera
-// genuinely shows boulders further out than a fixed 4.62 covers. Those
-// boulders would fall outside this eligibility check despite being visibly
-// on screen, rendering with the shared generic (uncracked, non-interactive)
-// texture — exactly the "boulder has no crack and doesn't respond to taps
-// on some devices" symptom. Deriving this from the actual camera bounds
-// plus a margin (comfortably more than the largest boulder radius, so a
-// boulder just past the frustum edge but still partly visible still
-// qualifies) makes it correct for whatever the real viewport turns out to
-// be, instead of a guess tuned to one aspect ratio.
-const VISIBLE_X = camera.right + 1.5;
+// Derived from the actual camera bounds (camera.right scales with the real
+// device/viewport aspect ratio) rather than a fixed guess, so it's correct
+// for whatever the real viewport turns out to be. The margin was previously
+// +1.5 (just over the largest boulder radius) but a boulder was still
+// reported missing its crack texture on a real device even with that in
+// place. Investigating turned up two things: (1) +1.5 leaves almost no
+// headroom beyond the radius itself for any device wider than what's been
+// tested, and (2) the Z-axis check below had NO margin at all — camera.top/
+// ORTHO_H is a fixed constant (doesn't vary with aspect ratio), but boulders
+// sitting just past it (confirmed: 62 boulders on this scene, comfortably
+// within X range, with |z| between ORTHO_H and ORTHO_H+4.5) were being
+// excluded purely by that missing margin, regardless of how wide VISIBLE_X
+// was — very likely the actual cause of the persisting report, since a
+// "top" boulder is a Z-boundary case. Both margins widened substantially
+// (1.5 -> 4.5) to comfortably cover real device variance; checked the
+// resulting eligible-boulder count and atlas size before deploying (see
+// commit notes) to confirm this stays well within texture size/memory
+// limits — this is a wider but still finite, dynamically-sized cutoff, not
+// the "bake everything, no cutoff" approach that caused a full regression.
+const MARGIN = 4.5;
+const VISIBLE_X = camera.right + MARGIN;
+const VISIBLE_Z = ORTHO_H + MARGIN;
 const visibleBoulderIdx = [];
-boulderDefs.forEach((b, i) => { if (Math.abs(b.x) <= VISIBLE_X && Math.abs(b.z) <= ORTHO_H) visibleBoulderIdx.push(i); });
+boulderDefs.forEach((b, i) => { if (Math.abs(b.x) <= VISIBLE_X && Math.abs(b.z) <= VISIBLE_Z) visibleBoulderIdx.push(i); });
 
 const ATLAS_CELL = 256;
 const atlasCols = Math.max(1, Math.ceil(Math.sqrt(visibleBoulderIdx.length + 1)));
