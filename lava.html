@@ -942,10 +942,12 @@ boulderMaterial.onBeforeCompile = (shader) => {
       // neighboring boulders sit close together, this also naturally lights
       // up the dark gaps/crevices between them (that's exactly where each
       // boulder's silhouette edge faces the camera). Sharp falloff (pow 4)
-      // and a low multiplier keep it a thin edge highlight, not a body glow.
+      // keeps it a thin edge highlight, not a body glow, even after raising
+      // the multiplier well above its original (too subtle) value so
+      // silhouettes/crevices read clearly against the dark background.
       vec3 rimViewDir = normalize(vViewPosition);
       float rim = pow(clamp(1.0 - max(dot(normalize(normal), rimViewDir), 0.0), 0.0, 1.0), 4.0);
-      totalEmissiveRadiance += riverGlowColor * rim * 0.09;
+      totalEmissiveRadiance += riverGlowColor * rim * 0.4;
       // baseline visibility floor, lowered further — this and the reduced
       // indirectDiffuse above were still adding up to a flat gray wash that
       // dominated over the plate texture's own (now wide) contrast, so
