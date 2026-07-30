@@ -488,18 +488,49 @@ function generateCrackPaths(seed, cx, cy, radius){
     return false;
   }
 
+  // Guards against a subtler kind of clutter than a mid-length crossing:
+  // several branches leaving the *same* point (the hub, or wherever an
+  // offshoot happens to start) at nearly the same angle. Neither branch
+  // technically crosses the other, but they run near-parallel out of that
+  // shared point and, once the crack widens during tap-fill (plus glow
+  // bloom), visually merge into a single clump right at the origin instead
+  // of reading as distinct fractures. Checked against each accepted
+  // branch's *actual* first-segment direction (not its nominal start
+  // angle) since the very first joint below already bends it by a wide,
+  // random amount before anything is drawn.
+  const MIN_HUB_ANGLE_SEP = 25 * Math.PI / 180;
+  const HUB_EPS = radius * 0.02;
+  const hubDirs = [];
+  function angularGap(a, b){
+    const d = Math.abs(a - b) % (Math.PI * 2);
+    return d > Math.PI ? Math.PI * 2 - d : d;
+  }
+  function clumpsAtSharedOrigin(startX, startY, dirAngle){
+    for (const h of hubDirs) {
+      const dx = h.x - startX, dy = h.y - startY;
+      if (dx*dx + dy*dy > HUB_EPS*HUB_EPS) continue;
+      if (angularGap(dirAngle, h.angle) < MIN_HUB_ANGLE_SEP) return true;
+    }
+    return false;
+  }
+
   function growBranch(startX, startY, startAng, len, startD, depth){
-    let accepted = null;
+    let accepted = null, acceptedDir = 0;
     for (let attempt = 0; attempt < MAX_GROW_ATTEMPTS; attempt++) {
       const cand = buildBranchCandidate(startX, startY, startAng, len);
       if (cand.cumLen < MIN_BRANCH_LEN) continue;
       if (candidateTangles(cand.pts)) continue;
+      const dirAngle = Math.atan2(cand.pts[1].y - cand.pts[0].y, cand.pts[1].x - cand.pts[0].x);
+      if (clumpsAtSharedOrigin(startX, startY, dirAngle)) continue;
       accepted = cand;
+      acceptedDir = dirAngle;
       break;
     }
     // Couldn't find a clean, legible walk within the attempt budget — skip
-    // this branch/offshoot rather than force a too-short or tangled one in.
+    // this branch/offshoot rather than force a too-short, tangled, or
+    // hub-clumped one in.
     if (!accepted) return;
+    hubDirs.push({ x: startX, y: startY, angle: acceptedDir });
 
     const pts = accepted.pts.map(p => ({ x: p.x, y: p.y, d: p.d + startD }));
     maxReach = Math.max(maxReach, startD + accepted.cumLen);
