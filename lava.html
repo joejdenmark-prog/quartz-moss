@@ -421,13 +421,24 @@ function generateCrackPaths(seed, cx, cy, radius){
   const paths = [];
   let maxReach = 0.0001;
 
-  function growBranch(startX, startY, startAng, len, startD, depth){
-    // few, long, straight segments with a wide alternating-side angle change
-    // at each joint — reads as an angular lightning-bolt/fracture trajectory
-    // rather than a smooth many-point curve.
+  // Quality gates applied to every branch/offshoot before it's committed to
+  // `paths`: reject (and reroll a fresh random walk for) anything too short
+  // to read as a real fracture line, or that crosses another branch already
+  // on this boulder in a way that looks tangled rather than a clean fracture
+  // network. Both are measured relative to this boulder's own radius/paths
+  // so they scale correctly across every boulder size and seed.
+  const MIN_BRANCH_LEN = radius * 0.18;
+  const MAX_GROW_ATTEMPTS = 6;
+
+  // Builds one candidate random walk without committing it anywhere, so it
+  // can be measured and checked first. Same walk logic as before: few, long,
+  // straight segments with a wide alternating-side angle change at each
+  // joint — reads as an angular lightning-bolt/fracture trajectory rather
+  // than a smooth many-point curve.
+  function buildBranchCandidate(startX, startY, startAng, len){
     const segs = 2 + Math.floor(r(0, 3));
-    const pts = [{ x: startX, y: startY, d: startD }];
-    let x = startX, y = startY, a = startAng, cumLen = startD;
+    const pts = [{ x: startX, y: startY, d: 0 }];
+    let x = startX, y = startY, a = startAng, cumLen = 0;
     let turnSign = rng() > 0.5 ? 1 : -1;
     for (let s = 0; s < segs; s++) {
       const sharp = rng() < 0.3 ? 1.5 : 1.0;      // occasional extra-sharp kink
@@ -439,7 +450,59 @@ function generateCrackPaths(seed, cx, cy, radius){
       cumLen += step;
       pts.push({ x, y, d: cumLen });
     }
-    maxReach = Math.max(maxReach, cumLen);
+    return { pts, cumLen, endAngle: a };
+  }
+
+  // True if segment AB crosses segment CD somewhere in their interiors.
+  // Touches right at (or very near) a shared endpoint don't count — that's
+  // exactly how a branch is meant to meet the hub, or an offshoot its
+  // parent, and isn't the tangled-overlap case being screened for here.
+  function segmentsCross(ax,ay,bx,by,cx,cy,dx,dy){
+    const d1x = bx-ax, d1y = by-ay;
+    const d2x = dx-cx, d2y = dy-cy;
+    const denom = d1x*d2y - d1y*d2x;
+    if (Math.abs(denom) < 1e-9) return false; // parallel/collinear — never the messy case
+    const t = ((cx-ax)*d2y - (cy-ay)*d2x) / denom;
+    const u = ((cx-ax)*d1y - (cy-ay)*d1x) / denom;
+    const m = 0.04;
+    return t > m && t < 1-m && u > m && u < 1-m;
+  }
+
+  // Checks a candidate's segments against every branch/offshoot already
+  // accepted on this boulder, plus its own earlier segments (a sharp
+  // alternating zigzag can in rare cases fold back over itself).
+  function candidateTangles(pts){
+    for (let i = 1; i < pts.length; i++) {
+      const a0 = pts[i-1], a1 = pts[i];
+      for (const other of paths) {
+        for (let j = 1; j < other.length; j++) {
+          const b0 = other[j-1], b1 = other[j];
+          if (segmentsCross(a0.x,a0.y,a1.x,a1.y,b0.x,b0.y,b1.x,b1.y)) return true;
+        }
+      }
+      for (let j = 1; j < i - 1; j++) {
+        const b0 = pts[j-1], b1 = pts[j];
+        if (segmentsCross(a0.x,a0.y,a1.x,a1.y,b0.x,b0.y,b1.x,b1.y)) return true;
+      }
+    }
+    return false;
+  }
+
+  function growBranch(startX, startY, startAng, len, startD, depth){
+    let accepted = null;
+    for (let attempt = 0; attempt < MAX_GROW_ATTEMPTS; attempt++) {
+      const cand = buildBranchCandidate(startX, startY, startAng, len);
+      if (cand.cumLen < MIN_BRANCH_LEN) continue;
+      if (candidateTangles(cand.pts)) continue;
+      accepted = cand;
+      break;
+    }
+    // Couldn't find a clean, legible walk within the attempt budget — skip
+    // this branch/offshoot rather than force a too-short or tangled one in.
+    if (!accepted) return;
+
+    const pts = accepted.pts.map(p => ({ x: p.x, y: p.y, d: p.d + startD }));
+    maxReach = Math.max(maxReach, startD + accepted.cumLen);
     paths.push(pts);
 
     // At most one level of offshoots, and only sometimes, and always just a
@@ -449,7 +512,7 @@ function generateCrackPaths(seed, cx, cy, radius){
     // a legible one.
     if (depth < 1 && rng() > 0.7) {
       const along = pts[1 + Math.floor(r(0, pts.length - 1))];
-      const subAng = a + r(0.5, 1.3) * (rng() > 0.5 ? 1 : -1);
+      const subAng = accepted.endAngle + r(0.5, 1.3) * (rng() > 0.5 ? 1 : -1);
       const subLen = len * r(0.25, 0.55);
       growBranch(along.x, along.y, subAng, subLen, along.d, depth + 1);
     }
