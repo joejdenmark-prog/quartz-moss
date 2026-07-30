@@ -228,7 +228,10 @@ const lavaMaterial = new THREE.ShaderMaterial({
 
     void main(){
       // domain-warped turbulence — reads as a viscous flowing surface
-      // rather than a smooth glowing mist.
+      // rather than a smooth glowing mist. Unchanged from before (same
+      // uTime coefficients throughout this block) so the flow's speed and
+      // wander pattern are identical — only the coloring/shading below was
+      // reworked, to match real-lava reference photos.
       vec2 flowUv = vUv*vec2(3.2,9.0) + vec2(uTime*0.02, -uTime*0.28);
       vec2 warp = vec2(fbm2(flowUv*1.4 + 5.2), fbm2(flowUv*1.4 - 3.7)) - 0.5;
       vec2 p1 = flowUv + warp*1.1;
@@ -242,14 +245,50 @@ const lavaMaterial = new THREE.ShaderMaterial({
 
       float veins = smoothstep(0.56, 0.80, n1*0.6 + n2*0.4);
 
-      vec3 darkBase   = vec3(0.36,0.016,0.009);
-      vec3 midBase    = vec3(0.52,0.028,0.014);
-      vec3 brightVein = vec3(0.58,0.15,0.045);
-      vec3 crustColor = vec3(0.185,0.0088,0.0048);
+      // Fine cellular surface bump — a small 2-octave noise field sampled
+      // at a slight offset in two directions to approximate a local
+      // gradient, used as a cheap fake-normal light term (same trick as the
+      // boulders' fixed crack-light direction) instead of an actual normal
+      // map. fbm2 (rather than a single noise() sample) avoids the
+      // underlying value-noise grid reading as a regular brick pattern at
+      // this scale; this is what gives the surface a rough, mottled,
+      // organic-rock read instead of a smooth gradient.
+      vec2 bumpUv = vUv*vec2(46.0,52.0) + vec2(uTime*0.02, -uTime*0.28) + warp*0.3;
+      float bumpC = fbm2(bumpUv);
+      float bumpX = fbm2(bumpUv + vec2(0.35,0.0));
+      float bumpY = fbm2(bumpUv + vec2(0.0,0.35));
+      vec2 bumpGrad = vec2(bumpX - bumpC, bumpY - bumpC);
+      float bumpLight = dot(normalize(bumpGrad + 1e-4), normalize(vec2(-0.5,-0.85)));
 
-      vec3 col = mix(darkBase, midBase, n1);
-      col = mix(col, brightVein, veins*0.22);
-      col = mix(col, crustColor, clamp(crust,0.0,1.0)*0.75);
+      // Heat field — how brightly/actively this point is flowing, before
+      // crust darkening. Combining both turbulence layers makes the bright
+      // channels wander, pinch and widen the way the reference photos show,
+      // rather than a flat glow across the whole river.
+      float heat = clamp(n1*0.65 + n2*0.35, 0.0, 1.0);
+
+      // Bright orange-yellow glowing channels (rather than a uniform dark
+      // crimson) grading up into a near-white hottest core at the strongest
+      // vein peaks, contrasted against a much darker, barely-red crust —
+      // matching the vivid-glow-against-dark-rock look of real lava photos.
+      vec3 crustColor  = vec3(0.05, 0.008, 0.004);
+      vec3 coolFlow    = vec3(0.30, 0.045, 0.012);
+      vec3 midHot      = vec3(0.80, 0.20, 0.025);
+      vec3 brightHot   = vec3(1.00, 0.46, 0.06);
+      vec3 hottestCore = vec3(1.00, 0.80, 0.28);
+
+      vec3 col = mix(coolFlow, midHot, smoothstep(0.15, 0.55, heat));
+      col = mix(col, brightHot, smoothstep(0.45, 0.80, heat));
+      col = mix(col, hottestCore, smoothstep(0.78, 0.98, heat) * smoothstep(0.5, 0.85, veins));
+
+      // Fine bump shading on top of the broad heat coloring — brightens
+      // crests and darkens troughs of the small-scale cellular texture.
+      col *= 1.0 + bumpLight*0.16;
+
+      // Solidified crust patches, darkened much further than before so they
+      // read as distinct cooled-rock islands breaking up the molten channel
+      // instead of a subtle tint — the scattered-dark-patches look the
+      // reference photos show even within the active flow.
+      col = mix(col, crustColor, clamp(crust,0.0,1.0)*0.88);
 
       float c = abs(vUv.x-0.5)*2.0;
 
@@ -258,11 +297,14 @@ const lavaMaterial = new THREE.ShaderMaterial({
       float meshHw = hw + ${EDGE_BLEED.toFixed(6)};
       float edgeFrac = hw/meshHw;
       float bank = smoothstep(edgeFrac*0.62, edgeFrac*1.05, c);
-      col = mix(col, crustColor*0.6, bank*0.95);
+      col = mix(col, crustColor*0.7, bank*0.95);
 
       // absolute brightness floor — the darkest parts of the flow must never
-      // read as near-black, regardless of bank/crust darkening.
-      col.r = max(col.r, 0.22);
+      // read as pure black, regardless of bank/crust darkening. Lowered
+      // from before (which forced a fairly bright minimum) so genuinely
+      // dark crust patches can read as dark — the higher-contrast look
+      // being asked for — while still avoiding true (0,0,0).
+      col = max(col, vec3(0.015, 0.003, 0.0015));
 
       gl_FragColor = vec4(col, 1.0);
     }
