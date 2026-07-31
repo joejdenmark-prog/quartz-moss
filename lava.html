@@ -692,16 +692,18 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
       // — natural rock fractures don't run in smooth arcs, so this is what
       // keeps the plate edges reading as irregular slab breaks instead of a
       // cellular diagram.
-      const gap = Math.sqrt(second) - Math.sqrt(best) + bumpNoise(px*0.6 + 91.0, py*0.6 - 47.0) * 3.5;
+      const gap = Math.sqrt(second) - Math.sqrt(best) + bumpNoise(px*0.6 + 91.0, py*0.6 - 47.0) * 4.5;
 
-      // Two noise octaves instead of one: the original coarse bumpNoise for
-      // broad shape variation across a plate, plus a finer, higher-
-      // frequency pass layered on top for the small-scale pitted/porous
-      // roughness the reference photos show — a single smooth octave read
-      // as gently shaded, not genuinely rough rock.
-      const coarseBump = bumpNoise(px, py) * 7;
-      const fineBump = bumpNoise(px*4.1 + 13.0, py*4.1 - 29.0) * 6;
-      let shade = plates[bestIdx].shade + coarseBump + fineBump;
+      // Three noise octaves instead of two: the original coarse bumpNoise
+      // for broad shape variation across a plate, a finer pass for the
+      // small-scale pitted/porous roughness, and now a third, even finer
+      // pass on top for a chunkier, more rugged read up close — amplitudes
+      // raised across the board from the last pass, which still read as
+      // gently shaded rather than genuinely rough rock.
+      const coarseBump = bumpNoise(px, py) * 10;
+      const fineBump = bumpNoise(px*4.1 + 13.0, py*4.1 - 29.0) * 9;
+      const microBump = bumpNoise(px*9.3 + 77.0, py*9.3 - 51.0) * 6;
+      let shade = plates[bestIdx].shade + coarseBump + fineBump + microBump;
       if (gap < seamReach) {
         // interpolate toward a near-black floor at the exact boundary,
         // rather than subtracting a capped amount — a subtraction still
@@ -724,14 +726,15 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
 
   // Scattered small dark pits — irregular soft-edged blobs, distinct from
   // the fine per-pixel grain below — give the surface a porous, cratered
-  // read at a medium scale the plate shading alone doesn't cover.
-  const pitCount = 46 + Math.floor(trng()*30);
+  // read at a medium scale the plate shading alone doesn't cover. Count and
+  // radius both raised for a chunkier, more rugged surface.
+  const pitCount = 60 + Math.floor(trng()*36);
   for (let i = 0; i < pitCount; i++) {
     const x = trng()*size, y = trng()*size;
-    const r = 2.5 + trng()*6;
+    const r = 3 + trng()*7.5;
     const pit = ctx.createRadialGradient(x, y, 0, x, y, r);
     const v = Math.floor(trng()*4);
-    pit.addColorStop(0, `rgba(${v},${v},${v},0.55)`);
+    pit.addColorStop(0, `rgba(${v},${v},${v},0.6)`);
     pit.addColorStop(1, `rgba(${v},${v},${v},0)`);
     ctx.fillStyle = pit;
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
@@ -793,12 +796,16 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         ctx.lineTo(p1.x - nx*off, p1.y - ny*off);
         ctx.stroke();
 
-        // far wall — the wall facing CRACK_LIGHT_DIR, also on top. A dark,
-        // desaturated gray rather than the near-white this used to be —
-        // just enough tonal lift above the pure-black core/shadow to read
-        // as a distinct wall catching a hint of ambient light, giving the
-        // groove a sense of physical depth without ever looking lit.
-        ctx.strokeStyle = 'rgba(42,38,36,0.6)';
+        // far wall — the wall facing CRACK_LIGHT_DIR, also on top. Darkened
+        // again from the deployed rgba(42,38,36,0.6) — still reading as too
+        // obvious in practice — but not all the way to rgba(24,21,20,0.45),
+        // which nearly disappeared entirely once this scene's aggressive
+        // ambient/direct light cuts (see boulderMaterial's onBeforeCompile)
+        // crushed it against the similarly-dark rock in an isolated test.
+        // A dark, desaturated gray just barely above the pure-black core/
+        // shadow, enough to read as a distinct wall giving the groove
+        // physical depth without ever looking lit.
+        ctx.strokeStyle = 'rgba(32,28,26,0.5)';
         ctx.lineWidth = 4;
         ctx.beginPath();
         ctx.moveTo(p0.x + nx*off, p0.y + ny*off);
@@ -834,21 +841,17 @@ function makeCrackGlowTexture(seed, paths){
   const distCnv = document.createElement('canvas'); distCnv.width = distCnv.height = size;
   const distCtx = distCnv.getContext('2d');
 
-  // Real-lava heat gradient — deep red at the outer edge, through vivid
-  // orange, up to a bright yellow-white hottest core, matching the
-  // reference photos rather than a flat single-tone orange. Drawn in four
-  // widening-to-narrowing layers (soft outer halo, a softer inner glow band
-  // for a smoother bloom-like falloff, a vivid orange mid band, and a
-  // yellow-white core) so the cross-section itself carries the same
-  // red -> orange -> yellow-white falloff the references show, rather than
-  // a single flat color. Green and blue both rise sharply toward the core
-  // (unlike before, where green was deliberately kept low everywhere) so
-  // the hottest pixels genuinely read as yellow-white once boosted through
-  // the emissive multiplier below, instead of a saturated red-orange.
-  const haloC0 = [0x58,0x08,0x00], haloC1 = [0x78,0x10,0x00];
-  const glowC0 = [0x9c,0x22,0x02], glowC1 = [0xb8,0x34,0x04];
-  const midC0  = [0xd8,0x4c,0x06], midC1  = [0xf2,0x68,0x0a];
-  const coreC0 = [0xff,0xaa,0x3a], coreC1 = [0xff,0xf4,0xcc];
+  // Deep red-to-orange gradient matching the lava river's own established
+  // palette (see coolFlow/midHot/brightHot in the river shader above),
+  // capped at a vivid orange rather than reaching yellow-white — the prior
+  // pass's near-white core read as too bright and mismatched against the
+  // river. Drawn in three narrower, more opaque layers (edge, mid, core)
+  // instead of the previous four wide, low-alpha ones — that soft, spread-
+  // out falloff was what gave the glow its "doodle"/drawn-line look; tighter
+  // widths with higher opacity read as a defined, crisp molten crack.
+  const haloC0 = [0x30,0x06,0x01], haloC1 = [0x48,0x0a,0x02];
+  const midC0  = [0x90,0x22,0x03], midC1  = [0xb8,0x30,0x04];
+  const coreC0 = [0xd8,0x4c,0x06], coreC1 = [0xff,0x70,0x0a];
   const distWidth = 16; // widest layer below — the reveal mask matches this so no layer gets clipped
   const widthSteps = 10; // ring count for the width-based thickness reveal, below
   // Shift the whole glow off the raw path centerline, toward the same side
@@ -876,22 +879,17 @@ function makeCrackGlowTexture(seed, paths){
 
       colorCtx.lineCap = 'round'; colorCtx.lineJoin = 'round';
 
+      // Edge — narrower and more opaque than the old wide, low-alpha halo,
+      // so the color falls off over a short distance instead of spreading
+      // into a soft haze.
       const [hr,hg,hb] = mix3(haloC0, haloC1);
-      colorCtx.strokeStyle = `rgba(${hr},${hg},${hb},0.55)`;
-      colorCtx.lineWidth = distWidth;
-      colorCtx.beginPath(); colorCtx.moveTo(gx0, gy0); colorCtx.lineTo(gx1, gy1); colorCtx.stroke();
-
-      // soft inner glow band, between the outer halo and the mid band —
-      // smooths the cross-section falloff into a bloom-like haze around the
-      // brightest area instead of a hard-edged jump between two rings.
-      const [gr,gg,gb] = mix3(glowC0, glowC1);
-      colorCtx.strokeStyle = `rgba(${gr},${gg},${gb},0.75)`;
-      colorCtx.lineWidth = 11;
+      colorCtx.strokeStyle = `rgba(${hr},${hg},${hb},0.8)`;
+      colorCtx.lineWidth = 10;
       colorCtx.beginPath(); colorCtx.moveTo(gx0, gy0); colorCtx.lineTo(gx1, gy1); colorCtx.stroke();
 
       const [mr,mg,mb] = mix3(midC0, midC1);
       colorCtx.strokeStyle = `rgb(${mr},${mg},${mb})`;
-      colorCtx.lineWidth = 9;
+      colorCtx.lineWidth = 6;
       colorCtx.beginPath(); colorCtx.moveTo(gx0, gy0); colorCtx.lineTo(gx1, gy1); colorCtx.stroke();
 
       const [cr,cg,cb] = mix3(coreC0, coreC1);
@@ -1138,7 +1136,12 @@ boulderMaterial.onBeforeCompile = (shader) => {
       vec3 crackGlowColor = texture2D(uCrackGlowColorAtlas, vAtlasUv).rgb;
       float crackDist = texture2D(uCrackGlowDistAtlas, vAtlasUv).r;
       float crackShow = step(0.0002, crackDist) * step(crackDist, vFillLevel);
-      totalEmissiveRadiance += crackGlowColor * crackShow * 2.4;`);
+      // Lowered from 2.4 — the baked glow colors were reworked to already
+      // sit close to the lava river's own hottest color (see coolFlow/
+      // midHot/brightHot in the river shader above) rather than needing a
+      // big boost toward near-white; at the old multiplier even the
+      // darker, more-orange palette still blew out toward a pale yellow.
+      totalEmissiveRadiance += crackGlowColor * crackShow * 1.3;`);
 };
 
 const boulderMesh = new THREE.InstancedMesh(boulderGeo, boulderMaterial, boulderDefs.length);
