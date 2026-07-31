@@ -769,47 +769,53 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         // All colors here stay in the rock's own dark tonal range; the
         // tap-fill glow (a separate overlay texture, drawn additively on
         // top only once triggered) is what actually supplies color/light.
-        // Widened from 4.5 — the dual-wall shading needs more spread to
-        // read as a real carved groove at a glance, not just up close.
-        const off = 5.5;
+        // Widened again (was 8, before that 5.5/4.5) — direct A/B testing
+        // (forcing a boulder's aRiverGlow attribute to 0 vs its real value)
+        // confirmed the river-adjacency glow and rim light in
+        // boulderMaterial's onBeforeCompile substantially wash out a lit
+        // facet's contrast, and even the previous, already-widened pass was
+        // still hard to make out on a brightly-lit boulder. Pushed further
+        // again, deliberately overshooting so there's headroom to dial back
+        // from a clearly-visible baseline instead of nudging up from one
+        // that's still marginal.
+        const off = 10;
 
-        // wide, more opaque dark halo underneath, then a near-black groove
-        // core on top of it — the base carved void, shaded below on top of
-        // it. Both widened and darkened further than before (was 16px at
-        // 0.55 alpha) — that read as too subtle to notice at normal
-        // viewing distance, even though it was visible up close.
-        ctx.strokeStyle = 'rgba(0,0,0,0.75)';
-        ctx.lineWidth = 22;
+        // Wide, now fully opaque dark halo underneath, then a near-black
+        // groove core on top of it — the base carved void. Halo alpha taken
+        // to 1.0 (was 0.92) — genuinely opaque black underneath, not just
+        // close to it, so there's no rock color left for the scene's
+        // additive lighting to wash out in the first place.
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 38;
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
 
         ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 9;
+        ctx.lineWidth = 15;
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
 
         // shadow side — drawn ON TOP of the halo/core (not under it) so it
         // actually reads as a dark rim cut into the rock instead of being
-        // buried under the wider fill beneath it
-        ctx.strokeStyle = 'rgba(0,0,0,0.98)';
-        ctx.lineWidth = 6;
+        // buried under the wider fill beneath it. Fully opaque black.
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 10;
         ctx.beginPath();
         ctx.moveTo(p0.x - nx*off, p0.y - ny*off);
         ctx.lineTo(p1.x - nx*off, p1.y - ny*off);
         ctx.stroke();
 
         // far wall — a dark, rock-toned rim on the side facing
-        // CRACK_LIGHT_DIR, also on top. Lifted back up from the last pass's
-        // rgba(32,28,26,0.5), which (combined with the halo/core also
-        // being too subtle) made the whole crack nearly disappear at normal
-        // viewing distance. Still capped at roughly the rock's own
-        // brightest plate tone (max shade ~55, see the plate loop above) —
-        // never brighter or a different hue than the rock itself — so it
-        // reads as a lit rim on a real groove wall, not a drawn highlight.
-        ctx.strokeStyle = 'rgba(52,46,42,0.7)';
-        ctx.lineWidth = 5;
+        // CRACK_LIGHT_DIR, also on top. Pushed further again (was
+        // rgba(85,75,68,0.9)) — deliberately erring toward too strong per
+        // instruction, to land clearly visible on even a brightly-lit,
+        // river-adjacent boulder rather than staying marginal. Still a
+        // dark, desaturated warm gray — nowhere near white or a saturated
+        // color, just a bolder version of the same rock-toned highlight.
+        ctx.strokeStyle = 'rgba(112,99,89,0.95)';
+        ctx.lineWidth = 10;
         ctx.beginPath();
         ctx.moveTo(p0.x + nx*off, p0.y + ny*off);
         ctx.lineTo(p1.x + nx*off, p1.y + ny*off);
