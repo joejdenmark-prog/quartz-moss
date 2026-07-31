@@ -659,7 +659,7 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
   // Large irregular cracked plate/slab shapes (a coarse Voronoi cellular
   // pattern) instead of a dot/pit scatter — each plate is a flat region
   // around its own seed point, its own near-black shade, with a darker seam
-  // painted along the boundary where two plates meet, plus subtle per-pixel
+  // painted along the boundary where two plates meet, plus per-pixel
   // bumpiness within it. Every tone here stays dark (well under a fifth of
   // full brightness) — no white/gray anywhere — but the spread between
   // plate and seam is kept wide within that dark range: this scene's
@@ -671,7 +671,7 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
   const plateCount = 7 + Math.floor(trng()*7); // 7-13 large plates
   const plates = [];
   for (let i = 0; i < plateCount; i++) {
-    plates.push({ x: trng()*size, y: trng()*size, shade: 22 + trng()*48 });
+    plates.push({ x: trng()*size, y: trng()*size, shade: 18 + trng()*34 });
   }
 
   const grid = 160; // sampled on a coarser grid than the 256px canvas, drawn as small blocks — cheap, one-time bake cost
@@ -687,9 +687,21 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         if (d < best) { second = best; best = d; bestIdx = p; }
         else if (d < second) { second = d; }
       }
-      const gap = Math.sqrt(second) - Math.sqrt(best);
+      // Jitter the seam boundary itself (a separate, decorrelated phase of
+      // the same bump noise) rather than leaving it a perfect Voronoi curve
+      // — natural rock fractures don't run in smooth arcs, so this is what
+      // keeps the plate edges reading as irregular slab breaks instead of a
+      // cellular diagram.
+      const gap = Math.sqrt(second) - Math.sqrt(best) + bumpNoise(px*0.6 + 91.0, py*0.6 - 47.0) * 3.5;
 
-      let shade = plates[bestIdx].shade + bumpNoise(px, py) * 5;
+      // Two noise octaves instead of one: the original coarse bumpNoise for
+      // broad shape variation across a plate, plus a finer, higher-
+      // frequency pass layered on top for the small-scale pitted/porous
+      // roughness the reference photos show — a single smooth octave read
+      // as gently shaded, not genuinely rough rock.
+      const coarseBump = bumpNoise(px, py) * 7;
+      const fineBump = bumpNoise(px*4.1 + 13.0, py*4.1 - 29.0) * 6;
+      let shade = plates[bestIdx].shade + coarseBump + fineBump;
       if (gap < seamReach) {
         // interpolate toward a near-black floor at the exact boundary,
         // rather than subtracting a capped amount — a subtraction still
@@ -699,20 +711,39 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         const t = 1 - gap / seamReach;
         shade = shade * (1 - t) + 2 * t;
       }
-      shade = Math.max(1, Math.min(70, Math.round(shade)));
+      shade = Math.max(1, Math.min(55, Math.round(shade)));
 
-      ctx.fillStyle = `rgb(${shade},${shade},${shade + 1})`;
+      // A faint warm-black undertone (red channel a touch above green/blue)
+      // rather than a neutral gray-black — reads as dark volcanic rock
+      // rather than dark stone of no particular temperature, while staying
+      // low enough to never look like a color shift.
+      ctx.fillStyle = `rgb(${shade+2},${shade},${Math.max(0,shade-2)})`;
       ctx.fillRect(gx*cell, gy*cell, cell + 1, cell + 1); // +1 so our own blocks don't leave seams against each other
     }
   }
 
+  // Scattered small dark pits — irregular soft-edged blobs, distinct from
+  // the fine per-pixel grain below — give the surface a porous, cratered
+  // read at a medium scale the plate shading alone doesn't cover.
+  const pitCount = 46 + Math.floor(trng()*30);
+  for (let i = 0; i < pitCount; i++) {
+    const x = trng()*size, y = trng()*size;
+    const r = 2.5 + trng()*6;
+    const pit = ctx.createRadialGradient(x, y, 0, x, y, r);
+    const v = Math.floor(trng()*4);
+    pit.addColorStop(0, `rgba(${v},${v},${v},0.55)`);
+    pit.addColorStop(1, `rgba(${v},${v},${v},0)`);
+    ctx.fillStyle = pit;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
+  }
+
   // fine per-pixel grain on top for close-up micro-texture — always dark,
   // low-alpha so it reads as rough grain rather than added speckle dots.
-  const grainCount = 2200;
+  const grainCount = 2600;
   for (let i = 0; i < grainCount; i++) {
     const x = trng()*size, y = trng()*size;
     const v = 2 + Math.floor(trng()*8);
-    ctx.fillStyle = `rgba(${v},${v},${v+1},${(0.15 + trng()*0.25).toFixed(2)})`;
+    ctx.fillStyle = `rgba(${v},${v},${v+1},${(0.15 + trng()*0.3).toFixed(2)})`;
     ctx.fillRect(x, y, 1, 1);
   }
 
@@ -729,18 +760,18 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         // on this boulder, instead of flipping with each segment's own
         // travel direction.
         if (nx*CRACK_LIGHT_DIR.x + ny*CRACK_LIGHT_DIR.y < 0) { nx = -nx; ny = -ny; }
-        // Pixel-sampled after the prior pass: the dark core/shadow trough
-        // was landing with real contrast (~20 vs ~55 base rock — confirmed
-        // via gl.readPixels), but the highlight stroke's rendered brightness
-        // (~55) was barely above the surrounding rock's own natural noise
-        // range, so it never read as a distinct lit edge — just more of the
-        // same dark trough with no visible "far wall". Pushed much brighter/
-        // more opaque here, plus widened further across the board.
+        // At rest (before any tap-fill), the crack should read as a dark
+        // void/seam cut into the rock — depth implied only by a subtle
+        // shadow gradation between its two walls, never by a bright or
+        // light-colored line. All colors here stay in the same near-black
+        // range as the rock itself; the tap-fill glow (a separate overlay
+        // texture, drawn additively on top only once triggered) is what
+        // actually supplies color/light.
         const off = 4.5;
 
-        // wide warm halo underneath, then a dark groove core on top — the
-        // base carved line, shaded below on top of it.
-        ctx.strokeStyle = 'rgba(58,10,0,0.9)';
+        // wide soft dark halo underneath, then a near-black groove core on
+        // top of it — the base carved void, shaded below on top of it.
+        ctx.strokeStyle = 'rgba(0,0,0,0.55)';
         ctx.lineWidth = 16;
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
@@ -762,10 +793,12 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         ctx.lineTo(p1.x - nx*off, p1.y - ny*off);
         ctx.stroke();
 
-        // highlight side — the wall facing CRACK_LIGHT_DIR, also on top.
-        // Much brighter/more opaque than before so it actually contrasts
-        // against ordinary rock texture instead of blending into it.
-        ctx.strokeStyle = 'rgba(226,229,233,0.97)';
+        // far wall — the wall facing CRACK_LIGHT_DIR, also on top. A dark,
+        // desaturated gray rather than the near-white this used to be —
+        // just enough tonal lift above the pure-black core/shadow to read
+        // as a distinct wall catching a hint of ambient light, giving the
+        // groove a sense of physical depth without ever looking lit.
+        ctx.strokeStyle = 'rgba(42,38,36,0.6)';
         ctx.lineWidth = 4;
         ctx.beginPath();
         ctx.moveTo(p0.x + nx*off, p0.y + ny*off);
@@ -801,17 +834,21 @@ function makeCrackGlowTexture(seed, paths){
   const distCnv = document.createElement('canvas'); distCnv.width = distCnv.height = size;
   const distCtx = distCnv.getContext('2d');
 
-  // deep red-orange "magma" gradient — darker/redder near the tap origin,
-  // still within the orange family (not a light/bright orange) at the tip.
-  // Drawn in three widening-to-narrowing layers (soft outer halo, mid band,
-  // bright hot core) so the baked glow itself carries bloom-like spread and
-  // a brighter center, instead of one flat-colored line. Green channel is
-  // kept low relative to red throughout (even at the hot core) so the
-  // dominant read stays deep red-orange rather than tipping into orange-
-  // yellow once boosted through the emissive multiplier below.
-  const haloC0 = [0x28,0x02,0x00], haloC1 = [0x46,0x06,0x00];
-  const midC0  = [0x46,0x04,0x00], midC1  = [0x64,0x0a,0x00];
-  const coreC0 = [0x6e,0x0a,0x00], coreC1 = [0xa0,0x1a,0x04];
+  // Real-lava heat gradient — deep red at the outer edge, through vivid
+  // orange, up to a bright yellow-white hottest core, matching the
+  // reference photos rather than a flat single-tone orange. Drawn in four
+  // widening-to-narrowing layers (soft outer halo, a softer inner glow band
+  // for a smoother bloom-like falloff, a vivid orange mid band, and a
+  // yellow-white core) so the cross-section itself carries the same
+  // red -> orange -> yellow-white falloff the references show, rather than
+  // a single flat color. Green and blue both rise sharply toward the core
+  // (unlike before, where green was deliberately kept low everywhere) so
+  // the hottest pixels genuinely read as yellow-white once boosted through
+  // the emissive multiplier below, instead of a saturated red-orange.
+  const haloC0 = [0x58,0x08,0x00], haloC1 = [0x78,0x10,0x00];
+  const glowC0 = [0x9c,0x22,0x02], glowC1 = [0xb8,0x34,0x04];
+  const midC0  = [0xd8,0x4c,0x06], midC1  = [0xf2,0x68,0x0a];
+  const coreC0 = [0xff,0xaa,0x3a], coreC1 = [0xff,0xf4,0xcc];
   const distWidth = 16; // widest layer below — the reveal mask matches this so no layer gets clipped
   const widthSteps = 10; // ring count for the width-based thickness reveal, below
   // Shift the whole glow off the raw path centerline, toward the same side
@@ -840,8 +877,16 @@ function makeCrackGlowTexture(seed, paths){
       colorCtx.lineCap = 'round'; colorCtx.lineJoin = 'round';
 
       const [hr,hg,hb] = mix3(haloC0, haloC1);
-      colorCtx.strokeStyle = `rgba(${hr},${hg},${hb},0.6)`;
+      colorCtx.strokeStyle = `rgba(${hr},${hg},${hb},0.55)`;
       colorCtx.lineWidth = distWidth;
+      colorCtx.beginPath(); colorCtx.moveTo(gx0, gy0); colorCtx.lineTo(gx1, gy1); colorCtx.stroke();
+
+      // soft inner glow band, between the outer halo and the mid band —
+      // smooths the cross-section falloff into a bloom-like haze around the
+      // brightest area instead of a hard-edged jump between two rings.
+      const [gr,gg,gb] = mix3(glowC0, glowC1);
+      colorCtx.strokeStyle = `rgba(${gr},${gg},${gb},0.75)`;
+      colorCtx.lineWidth = 11;
       colorCtx.beginPath(); colorCtx.moveTo(gx0, gy0); colorCtx.lineTo(gx1, gy1); colorCtx.stroke();
 
       const [mr,mg,mb] = mix3(midC0, midC1);
