@@ -764,24 +764,28 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         // travel direction.
         if (nx*CRACK_LIGHT_DIR.x + ny*CRACK_LIGHT_DIR.y < 0) { nx = -nx; ny = -ny; }
         // At rest (before any tap-fill), the crack should read as a dark
-        // void/seam cut into the rock — depth implied only by a subtle
-        // shadow gradation between its two walls, never by a bright or
-        // light-colored line. All colors here stay in the same near-black
-        // range as the rock itself; the tap-fill glow (a separate overlay
-        // texture, drawn additively on top only once triggered) is what
-        // actually supplies color/light.
-        const off = 4.5;
+        // void/seam cut into the rock — depth implied by shadow gradation
+        // between its two walls, never by a bright or light-colored line.
+        // All colors here stay in the rock's own dark tonal range; the
+        // tap-fill glow (a separate overlay texture, drawn additively on
+        // top only once triggered) is what actually supplies color/light.
+        // Widened from 4.5 — the dual-wall shading needs more spread to
+        // read as a real carved groove at a glance, not just up close.
+        const off = 5.5;
 
-        // wide soft dark halo underneath, then a near-black groove core on
-        // top of it — the base carved void, shaded below on top of it.
-        ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-        ctx.lineWidth = 16;
+        // wide, more opaque dark halo underneath, then a near-black groove
+        // core on top of it — the base carved void, shaded below on top of
+        // it. Both widened and darkened further than before (was 16px at
+        // 0.55 alpha) — that read as too subtle to notice at normal
+        // viewing distance, even though it was visible up close.
+        ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+        ctx.lineWidth = 22;
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
 
         ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 7.5;
+        ctx.lineWidth = 9;
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
@@ -789,24 +793,23 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         // shadow side — drawn ON TOP of the halo/core (not under it) so it
         // actually reads as a dark rim cut into the rock instead of being
         // buried under the wider fill beneath it
-        ctx.strokeStyle = 'rgba(0,0,0,0.96)';
-        ctx.lineWidth = 5;
+        ctx.strokeStyle = 'rgba(0,0,0,0.98)';
+        ctx.lineWidth = 6;
         ctx.beginPath();
         ctx.moveTo(p0.x - nx*off, p0.y - ny*off);
         ctx.lineTo(p1.x - nx*off, p1.y - ny*off);
         ctx.stroke();
 
-        // far wall — the wall facing CRACK_LIGHT_DIR, also on top. Darkened
-        // again from the deployed rgba(42,38,36,0.6) — still reading as too
-        // obvious in practice — but not all the way to rgba(24,21,20,0.45),
-        // which nearly disappeared entirely once this scene's aggressive
-        // ambient/direct light cuts (see boulderMaterial's onBeforeCompile)
-        // crushed it against the similarly-dark rock in an isolated test.
-        // A dark, desaturated gray just barely above the pure-black core/
-        // shadow, enough to read as a distinct wall giving the groove
-        // physical depth without ever looking lit.
-        ctx.strokeStyle = 'rgba(32,28,26,0.5)';
-        ctx.lineWidth = 4;
+        // far wall — a dark, rock-toned rim on the side facing
+        // CRACK_LIGHT_DIR, also on top. Lifted back up from the last pass's
+        // rgba(32,28,26,0.5), which (combined with the halo/core also
+        // being too subtle) made the whole crack nearly disappear at normal
+        // viewing distance. Still capped at roughly the rock's own
+        // brightest plate tone (max shade ~55, see the plate loop above) —
+        // never brighter or a different hue than the rock itself — so it
+        // reads as a lit rim on a real groove wall, not a drawn highlight.
+        ctx.strokeStyle = 'rgba(52,46,42,0.7)';
+        ctx.lineWidth = 5;
         ctx.beginPath();
         ctx.moveTo(p0.x + nx*off, p0.y + ny*off);
         ctx.lineTo(p1.x + nx*off, p1.y + ny*off);
