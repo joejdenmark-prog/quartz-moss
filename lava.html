@@ -2045,16 +2045,74 @@ document.getElementById('reset-btn').addEventListener('click', () => {
 });
 
 // ── Ambient background audio ─────────────────────────────────────────────────
-// Uses the Web Audio API (decodeAudioData + an AudioBufferSourceNode with
-// .loop = true) rather than a plain <audio loop> element — looping the raw
-// decoded PCM buffer directly avoids the small gap/click many browsers
-// introduce when an <audio> element restarts a compressed-format decoder at
-// the loop boundary (worse on mp3, which typically carries encoder padding
-// at the start/end of the file).
+// Uses the Web Audio API (decodeAudioData + sample-accurate scheduling)
+// rather than a plain <audio loop> element — looping raw decoded PCM
+// avoids the gap/click many browsers introduce when an <audio> element
+// restarts a compressed-format decoder at the loop boundary.
+//
+// A plain single-source `.loop = true` still audibly seamed on this file,
+// though. Inspecting the decoded buffer (getChannelData, checked in the
+// browser console) found the cause is in the source recording, not the
+// looping mechanism: the clip has ~46ms of near-silent lead-in before the
+// audible content starts, and only ~18ms of near-silence at the very tail
+// — so hard-looping the raw file plays audible content almost to the last
+// sample, then jumps to ~46ms of relative quiet before ramping back up.
+// That ~60ms "trough" right at the loop point, repeating every ~20s, is
+// what reads as a cutoff/gap. (The raw sample values at the exact start
+// and end are both ~0, so it isn't a hard transient click — no snap/pop,
+// just an audible dip in level.)
+//
+// Fixed here at the code level in two parts: (1) detect the actual
+// audible region of the decoded buffer at load time and loop *that*
+// window instead of the full file, trimming out both near-silent edges
+// so the loop boundary sits between two points that both have real
+// content; (2) still apply a short crossfade at that boundary (two
+// overlapping AudioBufferSourceNodes, scheduled via the Web Audio clock
+// rather than JS timers, ramped via linear gain automation) as insurance
+// against any residual waveform mismatch right at the trimmed edges. If
+// this still isn't fully seamless, the file's audible region itself likely
+// doesn't loop cleanly in its own right (its start and end simply sound
+// different), which would need a re-trimmed or loop-mastered replacement
+// file rather than a further code change.
 const AMBIENT_VOLUME = 0.5; // within the requested 40-60% range
-let audioCtx = null, audioGain = null, audioSource = null, audioBuffer = null;
+const LOOP_SILENCE_THRESH = 0.005; // ~-46dB "is there real content here" floor
+const LOOP_CROSSFADE_S = 0.12;     // 120ms crossfade at the (trimmed) loop point
+let audioCtx = null, audioGain = null, audioBuffer = null;
 let audioMuted = false, audioStarted = false;
 const muteBtn = document.getElementById('mute-btn');
+
+function findAudibleBounds(buffer){
+  const ch = buffer.getChannelData(0);
+  const n = ch.length;
+  let start = 0;
+  for (let i = 0; i < n; i++) { if (Math.abs(ch[i]) > LOOP_SILENCE_THRESH) { start = i; break; } }
+  let end = n - 1;
+  for (let i = n - 1; i >= 0; i--) { if (Math.abs(ch[i]) > LOOP_SILENCE_THRESH) { end = i; break; } }
+  return { startS: start / buffer.sampleRate, endS: end / buffer.sampleRate };
+}
+
+// Schedules one loop iteration (playing [loopStartS, loopStartS+loopDurS)
+// of the buffer) starting at `startTime` on the Web Audio clock, then
+// recursively schedules the next overlapping iteration ahead of time —
+// the standard lookahead pattern for gapless Web Audio loops, since it
+// keys all real timing off audioCtx.currentTime/AudioParam automation
+// rather than (jitter-prone) JS timer delays.
+function scheduleLoopIteration(startTime, loopStartS, loopDurS){
+  const src = audioCtx.createBufferSource();
+  src.buffer = audioBuffer;
+  const g = audioCtx.createGain();
+  src.connect(g).connect(audioGain);
+  const fade = Math.min(LOOP_CROSSFADE_S, loopDurS / 2);
+  g.gain.setValueAtTime(0, startTime);
+  g.gain.linearRampToValueAtTime(1, startTime + fade);
+  g.gain.setValueAtTime(1, startTime + loopDurS - fade);
+  g.gain.linearRampToValueAtTime(0, startTime + loopDurS);
+  src.start(startTime, loopStartS, loopDurS);
+  src.stop(startTime + loopDurS + 0.05);
+  const nextStart = startTime + loopDurS - fade;
+  const delayMs = Math.max(0, (nextStart - audioCtx.currentTime - 0.5)) * 1000;
+  setTimeout(() => scheduleLoopIteration(nextStart, loopStartS, loopDurS), delayMs);
+}
 
 function startAmbientAudio(){
   if (audioStarted) return;
@@ -2068,11 +2126,8 @@ function startAmbientAudio(){
     .then(buf => audioCtx.decodeAudioData(buf))
     .then(decoded => {
       audioBuffer = decoded;
-      audioSource = audioCtx.createBufferSource();
-      audioSource.buffer = audioBuffer;
-      audioSource.loop = true;
-      audioSource.connect(audioGain);
-      audioSource.start(0);
+      const { startS, endS } = findAudibleBounds(decoded);
+      scheduleLoopIteration(audioCtx.currentTime, startS, endS - startS);
     })
     .catch(() => {}); // if the file can't load/decode, the scene continues silently
 }
