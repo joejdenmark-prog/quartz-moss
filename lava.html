@@ -1142,26 +1142,6 @@ boulderMaterial.onBeforeCompile = (shader) => {
       // boulders read as mid-gray regardless of how dark the baked texture
       // was. Cut hard here instead of widening the texture range further.
       totalEmissiveRadiance += vec3(0.006, 0.0045, 0.0034);
-      // Texture-aware ambient floor — every other light term above is either
-      // a fixed-direction light (indirectDiffuse/directDiffuse, which only
-      // varies with a boulder's random per-instance rotation, not its
-      // distance from the river) or a flat, texture-independent color
-      // addition (the river-glow/rim terms and the floor just above), none
-      // of which scale with the baked plate/crack detail itself. Boulders
-      // that happen to catch little of those fixed-direction lights and
-      // sit far enough from the bank for the river-glow to be ~0 end up
-      // with essentially no light that actually reads the texture, so their
-      // plate/crack contrast — however strong it is in the baked atlas —
-      // never makes it to the screen; they round down to flat black
-      // regardless of the texture underneath. Multiplying by texRaw (rather
-      // than adding a flat color like the floor above) keeps this properly
-      // proportional to the boulder's own dark tones: crack pixels (near
-      // zero) stay near-black, brighter plate pixels get a little visible
-      // lift, and the rock's own tonal pattern — not a uniform gray wash —
-      // is what becomes visible in shadow. Kept small so it reads as "just
-      // enough ambient light to see the rock is there," not a brightness
-      // boost.
-      totalEmissiveRadiance += texRaw * 0.04;
       vec3 crackGlowColor = texture2D(uCrackGlowColorAtlas, vAtlasUv).rgb;
       float crackDist = texture2D(uCrackGlowDistAtlas, vAtlasUv).r;
       float crackShow = step(0.0002, crackDist) * step(crackDist, vFillLevel);
