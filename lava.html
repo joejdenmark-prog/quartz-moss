@@ -1270,59 +1270,99 @@ function updateBoulderHeat(dt){
 }
 
 // ── Bubbles: grow, swell, pop with splash ─────────────────────────────────────
-// Unlit dome shader, object-space (not view-dependent) so the shading holds
-// steady as the bubble grows rather than sliding around with the camera.
-// Previously this used a symmetric top/rim gradient with the darkest tone at
-// the pole and the brightest at the equator — backwards from how an actual
-// lit sphere reads, so it looked flat/sticker-like rather than round. This
-// is a proper fixed-direction diffuse + specular model instead: a single
-// light direction picks out a highlight on one side (like light catching the
-// top of a real blob of molten rock), the rest of the dome shades darker the
-// further it turns away from that direction, and a modest ambient floor
-// keeps the unlit side visibly dark rather than pure black.
+// Surface shader reuses the lava river's own noise/color pipeline verbatim
+// (same hash/noise/fbm functions, same flow-warp, same heat-driven color
+// ramp from cool flow through to a hottest near-white core, same crust
+// darkening and fine bump shading) instead of a separate sphere-shading
+// technique — a custom diffuse/specular model was tried here previously,
+// but it didn't read as "lava"; this makes a bubble look like a raised
+// patch of the same molten surface, just applied to the sphere's own UV.
+// Shares the exact same uTime uniform object as lavaMaterial (not a copy)
+// so its flow animation stays in sync automatically with no extra update
+// code needed.
 const bubbleGeo = new THREE.SphereGeometry(1, 12, 8);
 const bubbleShadowTex = makeRadialTexture('rgba(4,1,1,0.5)', 'rgba(4,1,1,0)');
 const MAX_BUBBLES = 5;
 const bubblePool = [];
 function makeBubbleMaterial(){
-  const t = range(0, 1);
-  const base      = new THREE.Color(0x3a0605).lerp(new THREE.Color(0x450806), t);
-  const highlight = new THREE.Color(0x9c2510).lerp(new THREE.Color(0xb82e12), t);
   return new THREE.ShaderMaterial({
-    uniforms: { uBase: { value: base }, uHighlight: { value: highlight } },
+    uniforms: { uTime: lavaMaterial.uniforms.uTime },
     vertexShader: `
-      varying vec3 vN;
+      varying vec2 vUv;
       void main(){
-        vN = normalize(normal);
+        vUv = uv;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `,
     fragmentShader: `
       precision mediump float;
-      varying vec3 vN;
-      uniform vec3 uBase;
-      uniform vec3 uHighlight;
+      varying vec2 vUv;
+      uniform float uTime;
+
+      float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453123); }
+      float noise(vec2 p){
+        vec2 i = floor(p), f = fract(p);
+        float a = hash(i), b = hash(i+vec2(1.0,0.0));
+        float c = hash(i+vec2(0.0,1.0)), d = hash(i+vec2(1.0,1.0));
+        vec2 u = f*f*(3.0-2.0*f);
+        return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+      }
+      float fbm2(vec2 p){
+        float v = 0.0, a = 0.5;
+        for(int i=0;i<2;i++){ v += a*noise(p); p *= 2.02; a *= 0.5; }
+        return v;
+      }
+      float fbm(vec2 p){
+        float v = 0.0, a = 0.5;
+        for(int i=0;i<4;i++){ v += a*noise(p); p *= 2.02; a *= 0.5; }
+        return v;
+      }
+
       void main(){
-        // Fixed light direction, mostly overhead with a sideways bias —
-        // this is what actually reads as roundness under this scene's
-        // top-down camera: it picks out an off-center bright patch on the
-        // visible cap instead of lighting it symmetrically.
-        vec3 lightDir = normalize(vec3(-0.42, 0.62, -0.32));
-        float ndotl = dot(vN, lightDir);
-        // Ambient floor (0.32) so the side facing away from the light
-        // still reads as dark rock, not a black silhouette.
-        float diffuse = 0.32 + clamp(ndotl, 0.0, 1.0) * 0.68;
-        vec3 col = uBase * diffuse;
-        // Tight, glossy highlight only right where the light hits most
-        // directly — a small bright patch, not a broad wash.
-        float spec = pow(clamp(ndotl, 0.0, 1.0), 5.0);
-        col += uHighlight * spec;
-        // this material bypasses the standard material chunks, so it needs
-        // its own brightness boost or it renders far too dark (near-black)
-        // and blends into the lava — a uniform multiplier (not a pow curve)
-        // keeps the R:G:B ratio intact so the bubble stays dark crimson
-        // instead of washing out toward gray/white.
-        gl_FragColor = vec4(clamp(col * 4.0, 0.0, 1.0), 1.0);
+        // Identical flow-warp/heat/crust/bump treatment as the river shader
+        // (see lavaMaterial above) — same uTime coefficients throughout, so
+        // the surface motion reads as the same substance, just on a sphere.
+        vec2 flowUv = vUv*vec2(3.2,9.0) + vec2(uTime*0.02, -uTime*0.28);
+        vec2 warp = vec2(fbm2(flowUv*1.4 + 5.2), fbm2(flowUv*1.4 - 3.7)) - 0.5;
+        vec2 p1 = flowUv + warp*1.1;
+        float n1 = fbm(p1);
+        vec2 p2 = vUv*vec2(6.5,17.0) - vec2(uTime*0.018, uTime*0.24) + warp*0.7;
+        float n2 = fbm(p2);
+
+        float crustN = fbm(vUv*vec2(9.5,23.0) + warp*1.6 + vec2(uTime*0.010, -uTime*0.045));
+        float crust = smoothstep(0.40,0.5,crustN) - smoothstep(0.5,0.60,crustN);
+        float veins = smoothstep(0.56, 0.80, n1*0.6 + n2*0.4);
+
+        vec2 bumpUv = vUv*vec2(46.0,52.0) + vec2(uTime*0.02, -uTime*0.28) + warp*0.3;
+        float bumpC = fbm2(bumpUv);
+        float bumpX = fbm2(bumpUv + vec2(0.35,0.0));
+        float bumpY = fbm2(bumpUv + vec2(0.0,0.35));
+        vec2 bumpGrad = vec2(bumpX - bumpC, bumpY - bumpC);
+        float bumpLight = dot(normalize(bumpGrad + 1e-4), normalize(vec2(-0.5,-0.85)));
+
+        float heat = clamp(n1*0.65 + n2*0.35, 0.0, 1.0);
+
+        vec3 crustColor  = vec3(0.05, 0.008, 0.004);
+        vec3 coolFlow    = vec3(0.30, 0.045, 0.012);
+        vec3 midHot      = vec3(0.80, 0.20, 0.025);
+        vec3 brightHot   = vec3(1.00, 0.46, 0.06);
+        vec3 hottestCore = vec3(1.00, 0.80, 0.28);
+
+        vec3 col = mix(coolFlow, midHot, smoothstep(0.15, 0.55, heat));
+        col = mix(col, brightHot, smoothstep(0.45, 0.80, heat));
+        col = mix(col, hottestCore, smoothstep(0.78, 0.98, heat) * smoothstep(0.5, 0.85, veins));
+
+        col *= 1.0 + bumpLight*0.16;
+        col = mix(col, crustColor, clamp(crust,0.0,1.0)*0.88);
+        col = max(col, vec3(0.015, 0.003, 0.0015));
+
+        // Extra glow/intensity beyond the flat river surface — a bit more
+        // vivid than the river itself, so this reads as an actively
+        // swelling blob of molten material rather than just a patch of the
+        // river's own surface pasted onto a sphere.
+        col *= 1.4;
+
+        gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
       }
     `,
   });
@@ -1409,6 +1449,18 @@ function makeRadialTexture(inner, outer, size=64){
 }
 const splashTex = makeRadialTexture('rgba(90,10,5,0.7)', 'rgba(50,4,2,0)');
 const smokeTex  = makeRadialTexture('rgba(60,8,8,0.45)', 'rgba(25,4,4,0)');
+// Distinct, more opaque texture for pop-triggered smoke — the ambient
+// smokeTex above is deliberately faint (0.45 inner alpha) for its own
+// small wisps, which was compounding with a low peak-alpha cap in
+// updateSmoke to make pop-smoke nearly invisible even at a bigger size.
+// Same dark maroon hue family, just far less transparent at its core.
+const popSmokeTex = makeRadialTexture('rgba(70,11,10,0.85)', 'rgba(30,5,5,0)');
+// Hot yellow-white ember core (rather than reusing splashTex's softer,
+// darker-orange radial) so burst fragments stay visible with additive
+// blending even when spawned over the lava river's own already-bright
+// orange surface — adding a near-white glow reads clearly there, whereas
+// the darker splash color barely showed any contrast on top of the lava.
+const burstTex = makeRadialTexture('rgba(255,205,130,0.95)', 'rgba(255,90,20,0)');
 
 function makeSpritePool(count, texture, blending){
   const pool = [];
@@ -1428,9 +1480,9 @@ const splashPool = makeSpritePool(40, splashTex, THREE.AdditiveBlending);
 const smokePool  = makeSpritePool(24, smokeTex, THREE.NormalBlending);
 // Small upward-arcing eruption fragments — a new, separate pool from the
 // existing flat splash particles below, since those never move in Y at all
-// (pure radial scatter at a fixed height). Reuses the same glowing texture
-// for visual consistency with the splash.
-const burstPool = makeSpritePool(24, splashTex, THREE.AdditiveBlending);
+// (pure radial scatter at a fixed height). Uses the brighter burstTex (not
+// splashTex) so it reads as a distinct hot ember against the lava.
+const burstPool = makeSpritePool(24, burstTex, THREE.AdditiveBlending);
 
 // ── Splash particles (bubble pops) ───────────────────────────────────────────
 function spawnSplash(x, z, count){
@@ -1469,8 +1521,11 @@ function updateSplashes(dt){
 // actually arc upward under their own initial velocity and fall back under
 // gravity, reading as small glowing droplets briefly thrown up by the pop
 // rather than a ripple sliding across the surface. Kept to a handful of
-// small, dim-ish (additive) sprites and well under half a second so it
-// stays a restrained accent, not a dramatic eruption.
+// sprites and well under a second so it stays a restrained accent, not a
+// dramatic eruption — size/opacity raised from the first pass, though,
+// which was barely visible: at the old size/opacity, plus the darker
+// splashTex color, additive-blending a fragment on top of the lava river's
+// own already-bright orange surface added almost no visible contrast.
 const BURST_GRAVITY = 5.5;
 function spawnBurst(x, z){
   const count = 4 + Math.floor(Math.random()*3); // 4-6 fragments
@@ -1479,17 +1534,17 @@ function spawnBurst(x, z){
     if (item.active) continue;
     const ang = Math.random()*Math.PI*2;
     const outSpeed = 0.35 + Math.random()*0.5;
-    const upSpeed = 1.1 + Math.random()*0.9;
+    const upSpeed = 1.3 + Math.random()*1.0;
     item.active = true;
     item.data = {
       x, z, y: 1.5,
       vx: Math.cos(ang)*outSpeed, vz: Math.sin(ang)*outSpeed, vy: upSpeed,
-      life: 0, maxLife: 0.38 + Math.random()*0.22,
-      size: 0.09 + Math.random()*0.08,
+      life: 0, maxLife: 0.42 + Math.random()*0.24,
+      size: 0.16 + Math.random()*0.12,
     };
     item.sprite.visible = true;
     item.sprite.position.set(x, 1.5, z);
-    item.sprite.material.opacity = 0.85;
+    item.sprite.material.opacity = 1.0;
     item.sprite.scale.setScalar(item.data.size);
     spawned++;
     if (spawned >= count) break;
@@ -1507,7 +1562,7 @@ function updateBurst(dt){
     // clamp at the spawn height instead of letting it sink through the
     // surface once gravity pulls it back down — reads as settling in place.
     item.sprite.position.set(d.x, Math.max(1.5, d.y), d.z);
-    item.sprite.material.opacity = 0.85 * (1 - tt);
+    item.sprite.material.opacity = 1.0 * (1 - tt);
     item.sprite.scale.setScalar(d.size * (1 - tt*0.3));
   }
 }
@@ -1527,9 +1582,15 @@ function spawnSmoke(){
   const z = range(-ORTHO_H*0.85, ORTHO_H*0.85);
   const x = centerX(z) + range(-0.7, 0.7) * halfWidth(z);
   item.active = true;
+  // Explicitly set the ambient texture/peak alpha every spawn (rather than
+  // relying on whatever this pool slot was last used for) since slots are
+  // now shared with spawnPopSmoke below, which uses a different texture and
+  // a much higher peak alpha.
+  item.sprite.material.map = smokeTex;
   item.data = {
     x, z, driftX: range(-0.05,0.05), driftZ: range(-0.02,0.06),
     life: 0, maxLife: range(3.5,5.5), startSize: range(0.35,0.55), endSize: range(1.0,1.5),
+    peakAlpha: 0.28,
   };
   item.sprite.visible = true;
   item.sprite.position.set(x, 1.2, z);
@@ -1537,10 +1598,14 @@ function spawnSmoke(){
   item.sprite.scale.set(item.data.startSize*0.55, item.data.startSize*1.3, 1);
 }
 // Spawned specifically when a bubble pops (see updateBubbles), on top of —
-// not instead of — the ambient drift-smoke above. Reuses the exact same
-// pool/animation as spawnSmoke, just with a noticeably wider size and
-// longer lifetime, so a pop reads as releasing a real puff of steam rather
-// than blending into the small ambient wisps.
+// not instead of — the ambient drift-smoke above. Shares updateSmoke's
+// animation, but with its own texture (popSmokeTex — more opaque at the
+// core than the deliberately-faint ambient smokeTex) and a much higher
+// peakAlpha, plus a noticeably bigger size and longer lifetime. The first
+// pass reused smokeTex and updateSmoke's hardcoded 0.28 peak-alpha cap
+// outright — between that low cap and smokeTex's own low 0.45 texture
+// alpha, the effective opacity topped out around 0.13, barely visible
+// against the lava regardless of how big the puff was.
 function spawnPopSmoke(x, z){
   const count = 1 + Math.floor(Math.random()*2); // 1-2 puffs per pop
   let spawned = 0;
@@ -1548,9 +1613,11 @@ function spawnPopSmoke(x, z){
     if (item.active) continue;
     const px = x + range(-0.15, 0.15), pz = z + range(-0.15, 0.15);
     item.active = true;
+    item.sprite.material.map = popSmokeTex;
     item.data = {
       x: px, z: pz, driftX: range(-0.06,0.06), driftZ: range(-0.03,0.08),
-      life: 0, maxLife: range(6.5,9.5), startSize: range(0.55,0.75), endSize: range(1.8,2.4),
+      life: 0, maxLife: range(6.5,9.5), startSize: range(0.9,1.2), endSize: range(3.2,4.2),
+      peakAlpha: 0.72,
     };
     item.sprite.visible = true;
     item.sprite.position.set(px, 1.2, pz);
@@ -1572,8 +1639,8 @@ function updateSmoke(dt){
     item.sprite.position.set(d.x, 1.2 + tt*1.5, d.z);
     item.sprite.scale.set(scale*0.55, scale*1.3, 1);
     let alpha;
-    if (tt < 0.15) alpha = tt/0.15 * 0.28;
-    else alpha = 0.28 * (1 - (tt-0.15)/0.85);
+    if (tt < 0.15) alpha = tt/0.15 * d.peakAlpha;
+    else alpha = d.peakAlpha * (1 - (tt-0.15)/0.85);
     item.sprite.material.opacity = Math.max(0, alpha);
   }
 }
