@@ -1270,19 +1270,26 @@ function updateBoulderHeat(dt){
 }
 
 // ── Bubbles: grow, swell, pop with splash ─────────────────────────────────────
-// Unlit dome shader: darker crown, subtly brighter rim (object-space normal.y,
-// not view-dependent) — reads as a thick lava bulge rather than a flat disc,
-// and can never produce a lit specular hotspot.
+// Unlit dome shader, object-space (not view-dependent) so the shading holds
+// steady as the bubble grows rather than sliding around with the camera.
+// Previously this used a symmetric top/rim gradient with the darkest tone at
+// the pole and the brightest at the equator — backwards from how an actual
+// lit sphere reads, so it looked flat/sticker-like rather than round. This
+// is a proper fixed-direction diffuse + specular model instead: a single
+// light direction picks out a highlight on one side (like light catching the
+// top of a real blob of molten rock), the rest of the dome shades darker the
+// further it turns away from that direction, and a modest ambient floor
+// keeps the unlit side visibly dark rather than pure black.
 const bubbleGeo = new THREE.SphereGeometry(1, 12, 8);
 const bubbleShadowTex = makeRadialTexture('rgba(4,1,1,0.5)', 'rgba(4,1,1,0)');
 const MAX_BUBBLES = 5;
 const bubblePool = [];
 function makeBubbleMaterial(){
   const t = range(0, 1);
-  const center = new THREE.Color(0x3a0605).lerp(new THREE.Color(0x450806), t);
-  const rim    = new THREE.Color(0x520c07).lerp(new THREE.Color(0x5e0e09), t);
+  const base      = new THREE.Color(0x3a0605).lerp(new THREE.Color(0x450806), t);
+  const highlight = new THREE.Color(0x9c2510).lerp(new THREE.Color(0xb82e12), t);
   return new THREE.ShaderMaterial({
-    uniforms: { uCenter: { value: center }, uRim: { value: rim } },
+    uniforms: { uBase: { value: base }, uHighlight: { value: highlight } },
     vertexShader: `
       varying vec3 vN;
       void main(){
@@ -1293,17 +1300,29 @@ function makeBubbleMaterial(){
     fragmentShader: `
       precision mediump float;
       varying vec3 vN;
-      uniform vec3 uCenter;
-      uniform vec3 uRim;
+      uniform vec3 uBase;
+      uniform vec3 uHighlight;
       void main(){
-        float rim = pow(1.0 - clamp(vN.y, 0.0, 1.0), 1.6);
-        vec3 linearColor = mix(uCenter, uRim, rim);
+        // Fixed light direction, mostly overhead with a sideways bias —
+        // this is what actually reads as roundness under this scene's
+        // top-down camera: it picks out an off-center bright patch on the
+        // visible cap instead of lighting it symmetrically.
+        vec3 lightDir = normalize(vec3(-0.42, 0.62, -0.32));
+        float ndotl = dot(vN, lightDir);
+        // Ambient floor (0.32) so the side facing away from the light
+        // still reads as dark rock, not a black silhouette.
+        float diffuse = 0.32 + clamp(ndotl, 0.0, 1.0) * 0.68;
+        vec3 col = uBase * diffuse;
+        // Tight, glossy highlight only right where the light hits most
+        // directly — a small bright patch, not a broad wash.
+        float spec = pow(clamp(ndotl, 0.0, 1.0), 5.0);
+        col += uHighlight * spec;
         // this material bypasses the standard material chunks, so it needs
         // its own brightness boost or it renders far too dark (near-black)
         // and blends into the lava — a uniform multiplier (not a pow curve)
         // keeps the R:G:B ratio intact so the bubble stays dark crimson
         // instead of washing out toward gray/white.
-        gl_FragColor = vec4(clamp(linearColor * 4.8, 0.0, 1.0), 1.0);
+        gl_FragColor = vec4(clamp(col * 4.0, 0.0, 1.0), 1.0);
       }
     `,
   });
@@ -1328,7 +1347,11 @@ function trySpawnBubble(){
   const x = centerX(z) + range(-0.7, 0.7) * halfWidth(z);
   const maxR = range(0.19, 0.31);
   item.active = true; activeBubbleCount++;
-  item.data = { x, z, maxR, phase: 'grow', t: 0, growDur: range(2.0, 3.4), popT: 0 };
+  // Grow duration roughly doubled (was 2.0-3.4s) — a slower, more organic
+  // swell that matches this scene's relaxed pacing rather than visibly
+  // inflating in a couple of seconds. Spawn locations/frequency (the code
+  // above this line, and the respawn delay below) are unchanged.
+  item.data = { x, z, maxR, phase: 'grow', t: 0, growDur: range(4.2, 6.8), popT: 0 };
   item.mesh.visible = true;
   item.mesh.position.set(x, -maxR*0.85, z);
   item.mesh.scale.setScalar(0.001);
@@ -1352,12 +1375,18 @@ function updateBubbles(dt){
       item.shadow.material.opacity = sm * 0.5;
       if (d.t >= 1) { d.phase = 'pop'; d.popT = 0; }
     } else {
+      // Pop duration also lengthened a little (was 0.08s) as part of the
+      // same "slower, more organic" swell-and-pop cycle — still a quick
+      // snap relative to the multi-second grow, just not an instant cut.
+      const POP_DUR = 0.14;
       d.popT += dt;
-      const s = 1 + Math.min(1, d.popT/0.08) * 0.45;
+      const s = 1 + Math.min(1, d.popT/POP_DUR) * 0.45;
       item.mesh.scale.setScalar(d.maxR * s);
-      item.shadow.material.opacity = Math.max(0, 0.5 * (1 - d.popT/0.08));
-      if (d.popT >= 0.08) {
+      item.shadow.material.opacity = Math.max(0, 0.5 * (1 - d.popT/POP_DUR));
+      if (d.popT >= POP_DUR) {
         spawnSplash(d.x, d.z, 10 + Math.floor(Math.random()*5));
+        spawnPopSmoke(d.x, d.z);
+        spawnBurst(d.x, d.z);
         item.active = false; item.mesh.visible = false; item.shadow.visible = false; activeBubbleCount--;
         setTimeout(trySpawnBubble, 200 + Math.random()*900);
       }
@@ -1393,7 +1422,15 @@ function makeSpritePool(count, texture, blending){
   return pool;
 }
 const splashPool = makeSpritePool(40, splashTex, THREE.AdditiveBlending);
-const smokePool  = makeSpritePool(14, smokeTex, THREE.NormalBlending);
+// Raised from 14 — smoke puffs now also spawn on every bubble pop (below,
+// alongside the pre-existing ambient drift spawning), so more can be alive
+// at once; each individual puff is unchanged in how often it appears.
+const smokePool  = makeSpritePool(24, smokeTex, THREE.NormalBlending);
+// Small upward-arcing eruption fragments — a new, separate pool from the
+// existing flat splash particles below, since those never move in Y at all
+// (pure radial scatter at a fixed height). Reuses the same glowing texture
+// for visual consistency with the splash.
+const burstPool = makeSpritePool(24, splashTex, THREE.AdditiveBlending);
 
 // ── Splash particles (bubble pops) ───────────────────────────────────────────
 function spawnSplash(x, z, count){
@@ -1426,6 +1463,55 @@ function updateSplashes(dt){
   }
 }
 
+// ── Small eruption burst (bubble pops) ───────────────────────────────────────
+// A brief, contained accent layered on top of the existing splash above —
+// unlike that flat radial scatter (which never moves in Y), these fragments
+// actually arc upward under their own initial velocity and fall back under
+// gravity, reading as small glowing droplets briefly thrown up by the pop
+// rather than a ripple sliding across the surface. Kept to a handful of
+// small, dim-ish (additive) sprites and well under half a second so it
+// stays a restrained accent, not a dramatic eruption.
+const BURST_GRAVITY = 5.5;
+function spawnBurst(x, z){
+  const count = 4 + Math.floor(Math.random()*3); // 4-6 fragments
+  let spawned = 0;
+  for (const item of burstPool) {
+    if (item.active) continue;
+    const ang = Math.random()*Math.PI*2;
+    const outSpeed = 0.35 + Math.random()*0.5;
+    const upSpeed = 1.1 + Math.random()*0.9;
+    item.active = true;
+    item.data = {
+      x, z, y: 1.5,
+      vx: Math.cos(ang)*outSpeed, vz: Math.sin(ang)*outSpeed, vy: upSpeed,
+      life: 0, maxLife: 0.38 + Math.random()*0.22,
+      size: 0.09 + Math.random()*0.08,
+    };
+    item.sprite.visible = true;
+    item.sprite.position.set(x, 1.5, z);
+    item.sprite.material.opacity = 0.85;
+    item.sprite.scale.setScalar(item.data.size);
+    spawned++;
+    if (spawned >= count) break;
+  }
+}
+function updateBurst(dt){
+  for (const item of burstPool) {
+    if (!item.active) continue;
+    const d = item.data;
+    d.life += dt;
+    const tt = d.life / d.maxLife;
+    if (tt >= 1) { item.active = false; item.sprite.visible = false; continue; }
+    d.vy -= BURST_GRAVITY * dt;
+    d.x += d.vx*dt; d.z += d.vz*dt; d.y += d.vy*dt;
+    // clamp at the spawn height instead of letting it sink through the
+    // surface once gravity pulls it back down — reads as settling in place.
+    item.sprite.position.set(d.x, Math.max(1.5, d.y), d.z);
+    item.sprite.material.opacity = 0.85 * (1 - tt);
+    item.sprite.scale.setScalar(d.size * (1 - tt*0.3));
+  }
+}
+
 // ── Smoke puffs drifting off the lava ────────────────────────────────────────
 let smokeTimer = 0.4;
 function updateSmokeSpawning(dt){
@@ -1449,6 +1535,30 @@ function spawnSmoke(){
   item.sprite.position.set(x, 1.2, z);
   item.sprite.material.opacity = 0;
   item.sprite.scale.set(item.data.startSize*0.55, item.data.startSize*1.3, 1);
+}
+// Spawned specifically when a bubble pops (see updateBubbles), on top of —
+// not instead of — the ambient drift-smoke above. Reuses the exact same
+// pool/animation as spawnSmoke, just with a noticeably wider size and
+// longer lifetime, so a pop reads as releasing a real puff of steam rather
+// than blending into the small ambient wisps.
+function spawnPopSmoke(x, z){
+  const count = 1 + Math.floor(Math.random()*2); // 1-2 puffs per pop
+  let spawned = 0;
+  for (const item of smokePool) {
+    if (item.active) continue;
+    const px = x + range(-0.15, 0.15), pz = z + range(-0.15, 0.15);
+    item.active = true;
+    item.data = {
+      x: px, z: pz, driftX: range(-0.06,0.06), driftZ: range(-0.03,0.08),
+      life: 0, maxLife: range(6.5,9.5), startSize: range(0.55,0.75), endSize: range(1.8,2.4),
+    };
+    item.sprite.visible = true;
+    item.sprite.position.set(px, 1.2, pz);
+    item.sprite.material.opacity = 0;
+    item.sprite.scale.set(item.data.startSize*0.55, item.data.startSize*1.3, 1);
+    spawned++;
+    if (spawned >= count) break;
+  }
 }
 function updateSmoke(dt){
   for (const item of smokePool) {
@@ -1652,6 +1762,7 @@ renderer.setAnimationLoop(() => {
   updateSmokeSpawning(dt);
   updateSmoke(dt);
   updateSplashes(dt);
+  updateBurst(dt);
 
   renderer.render(scene, camera);
 
