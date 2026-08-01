@@ -1469,25 +1469,53 @@ function makeRadialTexture(inner, outer, size=64){
 }
 // A perfectly circular radial gradient (makeRadialTexture above) rotates
 // into itself with no visible change, so per-sprite rotation is wasted on
-// it. This bakes several overlapping soft blobs at jittered positions/sizes
-// into one irregular, non-circular cloud shape instead — rotating and
+// it. This bakes an irregular, lobed cloud shape instead — rotating and
 // offsetting instances of THIS texture is what actually gives overlapping
 // sprites a wispy, uneven silhouette rather than a stack of perfect
 // circles. Baked once and reused (cheap); "rgb" is an "r,g,b" string.
-function makeWispyTexture(rgb, size=96){
+//
+// Two rounds ago this was 5 loosely-scattered soft-edged blobs, which read
+// as one smooth soft-focus smudge rather than actual cloud structure —
+// each blob faded gradually across its whole radius (0 -> 1 alpha, linear),
+// so overlapping blobs just blurred together instead of showing distinct
+// rounded bumps. Rebuilt around a real reference-image cumulus/cauliflower
+// shape: a tight core cluster of large lobes (the cloud's solid main body)
+// plus a ring of smaller lobes bulging off that core's rim (the individual
+// puffy bumps that give a cauliflower its texture). Each lobe now holds
+// near-flat alpha out to ~65% of its own radius before falling off, so
+// lobes read as distinct rounded puffs with real edges instead of a soft
+// gaussian blur — that edge definition is what a flat blur can't produce.
+function makeWispyTexture(rgb, size=110){
   const cnv = document.createElement('canvas'); cnv.width = cnv.height = size;
   const ctx = cnv.getContext('2d');
-  const blobCount = 5;
-  for (let i = 0; i < blobCount; i++) {
-    const bx = size*0.5 + (Math.random()-0.5)*size*0.55;
-    const by = size*0.5 + (Math.random()-0.5)*size*0.55;
-    const br = size*(0.26 + Math.random()*0.24);
-    const a = 0.32 + Math.random()*0.3;
-    const g = ctx.createRadialGradient(bx,by,0,bx,by,br);
-    g.addColorStop(0, `rgba(${rgb},${a})`);
-    g.addColorStop(1, `rgba(${rgb},0)`);
+  const cx = size*0.5, cy = size*0.5;
+  function puff(bx, by, br, a){
+    const g = ctx.createRadialGradient(bx,by,0, bx,by,br);
+    g.addColorStop(0,    `rgba(${rgb},${a})`);
+    g.addColorStop(0.65, `rgba(${rgb},${a})`);
+    g.addColorStop(1,    `rgba(${rgb},0)`);
     ctx.fillStyle = g;
-    ctx.fillRect(0,0,size,size);
+    ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI*2); ctx.fill();
+  }
+  // Core body — a handful of large, tightly overlapping lobes clustered
+  // near the center, forming the cloud's solid main mass.
+  const coreCount = 5;
+  for (let i = 0; i < coreCount; i++) {
+    const ang = (Math.PI*2*i/coreCount) + (Math.random()-0.5)*0.8;
+    const dist = size*(0.06 + Math.random()*0.08);
+    const bx = cx + Math.cos(ang)*dist, by = cy + Math.sin(ang)*dist*0.85;
+    const br = size*(0.24 + Math.random()*0.10);
+    puff(bx, by, br, 0.55 + Math.random()*0.2);
+  }
+  // Rim bumps — smaller lobes bulging outward off the core, giving the
+  // silhouette its lobed, cauliflower-like edge instead of one smooth curve.
+  const bumpCount = 9;
+  for (let i = 0; i < bumpCount; i++) {
+    const ang = (Math.PI*2*i/bumpCount) + (Math.random()-0.5)*0.6;
+    const dist = size*(0.22 + Math.random()*0.13);
+    const bx = cx + Math.cos(ang)*dist, by = cy + Math.sin(ang)*dist*0.9;
+    const br = size*(0.09 + Math.random()*0.08);
+    puff(bx, by, br, 0.4 + Math.random()*0.25);
   }
   const tex = new THREE.CanvasTexture(cnv);
   tex.needsUpdate = true;
@@ -1504,12 +1532,16 @@ const smokeTex  = makeRadialTexture('rgba(60,8,8,0.45)', 'rgba(25,4,4,0)');
 // circle) so overlapping/rotating puffs read as curling tendrils rather
 // than a stack of flat gray discs.
 const popSmokeTex = makeWispyTexture('22,20,20');
-// Hot yellow-white ember core (rather than reusing splashTex's softer,
-// darker-orange radial) so burst fragments stay visible with additive
-// blending even when spawned over the lava river's own already-bright
-// orange surface — adding a near-white glow reads clearly there, whereas
-// the darker splash color barely showed any contrast on top of the lava.
-const burstTex = makeRadialTexture('rgba(255,205,130,0.95)', 'rgba(255,90,20,0)');
+// Pure white-hot core (rather than the previous pale yellow-orange) so
+// burst fragments stay visible with additive blending even when spawned
+// over the lava river's own already-bright orange surface — a live
+// in-browser check (spawning a real pop via the production code path and
+// reading back sprite opacity/position, then screenshotting) showed the
+// old yellow-orange core barely added any contrast against the similarly-
+// colored lava once its opacity had faded partway: additive orange-on-
+// orange reads as "slightly brighter orange," not a distinct spark. White
+// additively blended onto orange reads as a clearly distinct hot glint.
+const burstTex = makeRadialTexture('rgba(255,255,255,0.95)', 'rgba(255,120,40,0)');
 
 function makeSpritePool(count, texture, blending){
   const pool = [];
@@ -1618,7 +1650,15 @@ function updateBurst(dt){
     // end (a half sine over the fragment's life) — the visible stand-in for
     // a rise-then-fall arc.
     const arc = 1.0 + Math.sin(Math.min(1, tt) * Math.PI) * 0.5;
-    item.sprite.material.opacity = 1.0 * (1 - tt);
+    // Previously faded linearly from the very first frame (opacity = 1-tt),
+    // so by the time fragments had visibly separated from the pop point
+    // they were already down around 0.3-0.4 opacity — combined with
+    // additive blending on a bright, similarly-colored background, a live
+    // test confirmed that made them nearly invisible mid-flight despite
+    // being spawned and moving correctly. Hold near-full brightness through
+    // the active separation phase instead, then fade over the back half.
+    const opacity = tt < 0.4 ? 1.0 : 1.0 * (1 - (tt-0.4)/0.6);
+    item.sprite.material.opacity = opacity;
     item.sprite.scale.setScalar(d.size * arc);
   }
 }
@@ -1669,25 +1709,35 @@ function spawnSmoke(){
 // initial `life`, relying on updateSmoke's existing alpha clamp to keep it
 // invisible until its delay elapses) so puffs unfurl one after another
 // instead of all blooming in perfect unison.
+// Coverage/opacity trimmed from the previous pass per feedback: fewer puffs
+// per pop, tighter position jitter and drift (less spread across the
+// screen), smaller sizes, and a lower peak-alpha range (lighter/wispier).
+// Color is untouched — still popSmokeTex's same dark neutral gray, just
+// more transparent. aspectX/aspectY replace updateSmoke's default 0.55/1.3
+// stretch: that stretch was tuned for the old perfectly-circular texture to
+// fake a rising-column look, but it squashes this round's baked cauliflower
+// lobes into ovals, so pop-smoke now renders closer to the texture's native
+// (rounder) proportions instead.
 function spawnPopSmoke(x, z){
-  const count = 4 + Math.floor(Math.random()*3); // 4-6 puffs per pop
+  const count = 3 + Math.floor(Math.random()*3); // 3-5 puffs per pop
   let spawned = 0;
   for (const item of smokePool) {
     if (item.active) continue;
-    const px = x + range(-0.32, 0.32), pz = z + range(-0.32, 0.32);
+    const px = x + range(-0.22, 0.22), pz = z + range(-0.22, 0.22);
     item.active = true;
     item.sprite.material.map = popSmokeTex;
     item.data = {
-      x: px, z: pz, driftX: range(-0.1,0.1), driftZ: range(-0.05,0.13),
-      life: -range(0, 0.5), maxLife: range(6.0,9.5), startSize: range(1.0,1.6), endSize: range(3.6,5.6),
-      peakAlpha: range(0.55, 0.92),
+      x: px, z: pz, driftX: range(-0.08,0.08), driftZ: range(-0.04,0.10),
+      life: -range(0, 0.5), maxLife: range(6.0,9.5), startSize: range(0.8,1.3), endSize: range(2.6,4.0),
+      peakAlpha: range(0.30, 0.55),
       rot: range(0, Math.PI*2), rotSpeed: range(-0.5, 0.5),
+      aspectX: range(0.82, 0.95), aspectY: range(0.95, 1.15),
     };
     item.sprite.visible = true;
     item.sprite.position.set(px, 1.2, pz);
     item.sprite.material.opacity = 0;
     item.sprite.material.rotation = item.data.rot;
-    item.sprite.scale.set(item.data.startSize*0.55, item.data.startSize*1.3, 1);
+    item.sprite.scale.set(item.data.startSize*item.data.aspectX, item.data.startSize*item.data.aspectY, 1);
     spawned++;
     if (spawned >= count) break;
   }
@@ -1703,7 +1753,7 @@ function updateSmoke(dt){
     d.x += d.driftX*dt; d.z += d.driftZ*dt;
     const scale = d.startSize + (d.endSize - d.startSize) * tt;
     item.sprite.position.set(d.x, 1.2 + tt*1.5, d.z);
-    item.sprite.scale.set(scale*0.55, scale*1.3, 1);
+    item.sprite.scale.set(scale*(d.aspectX ?? 0.55), scale*(d.aspectY ?? 1.3), 1);
     if (d.rotSpeed) item.sprite.material.rotation = d.rot + d.rotSpeed * d.life;
     let alpha;
     if (tt < 0.15) alpha = tt/0.15 * d.peakAlpha;
