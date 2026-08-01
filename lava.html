@@ -44,6 +44,22 @@
   }
   #reset-btn:hover  { opacity:1; }
   #reset-btn:active { transform:scale(.9); opacity:1; }
+  #mute-btn{
+    position:fixed; top:12px; right:12px; width:38px; height:38px;
+    border-radius:50%;
+    border:1px solid rgba(255,110,60,0.35);
+    background:rgba(20,6,4,0.72);
+    color:rgba(255,140,90,0.9);
+    font-size:16px; line-height:1;
+    display:flex; align-items:center; justify-content:center;
+    cursor:pointer;
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    transition:opacity .25s ease, transform .14s ease;
+    opacity:.6; z-index:100; user-select:none;
+    -webkit-tap-highlight-color:transparent; touch-action:manipulation;
+  }
+  #mute-btn:hover  { opacity:1; }
+  #mute-btn:active { transform:scale(.9); opacity:1; }
 </style>
 </head>
 <body>
@@ -51,6 +67,7 @@
 <div id="vignette"></div>
 <div id="fps">-- fps</div>
 <button id="reset-btn" title="Reset">↺</button>
+<button id="mute-btn" title="Mute">🔊</button>
 
 <script type="importmap">
 { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
@@ -2025,6 +2042,55 @@ document.getElementById('reset-btn').addEventListener('click', () => {
   for (let i = 0; i < dragLastSpawn.length; i++) dragLastSpawn[i] = null;
   boulderDownId = null;
   clearTimeout(holdTimer);
+});
+
+// ── Ambient background audio ─────────────────────────────────────────────────
+// Uses the Web Audio API (decodeAudioData + an AudioBufferSourceNode with
+// .loop = true) rather than a plain <audio loop> element — looping the raw
+// decoded PCM buffer directly avoids the small gap/click many browsers
+// introduce when an <audio> element restarts a compressed-format decoder at
+// the loop boundary (worse on mp3, which typically carries encoder padding
+// at the start/end of the file).
+const AMBIENT_VOLUME = 0.5; // within the requested 40-60% range
+let audioCtx = null, audioGain = null, audioSource = null, audioBuffer = null;
+let audioMuted = false, audioStarted = false;
+const muteBtn = document.getElementById('mute-btn');
+
+function startAmbientAudio(){
+  if (audioStarted) return;
+  audioStarted = true;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  audioGain = audioCtx.createGain();
+  audioGain.gain.value = audioMuted ? 0 : AMBIENT_VOLUME;
+  audioGain.connect(audioCtx.destination);
+  fetch('audio/lava-ambient.mp3')
+    .then(r => r.arrayBuffer())
+    .then(buf => audioCtx.decodeAudioData(buf))
+    .then(decoded => {
+      audioBuffer = decoded;
+      audioSource = audioCtx.createBufferSource();
+      audioSource.buffer = audioBuffer;
+      audioSource.loop = true;
+      audioSource.connect(audioGain);
+      audioSource.start(0);
+    })
+    .catch(() => {}); // if the file can't load/decode, the scene continues silently
+}
+// Browsers block audio until a user gesture — start (or resume, if the
+// context already exists but iOS left it suspended) on the very first
+// pointerdown anywhere on the page. Separate, passive, one-time listener so
+// it never interferes with the existing boulder/bubble/river hit-testing
+// on the canvas's own pointerdown handler above.
+window.addEventListener('pointerdown', () => {
+  if (!audioStarted) startAmbientAudio();
+  else if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+}, { once: true, passive: true });
+
+muteBtn.addEventListener('click', () => {
+  audioMuted = !audioMuted;
+  if (audioGain) audioGain.gain.value = audioMuted ? 0 : AMBIENT_VOLUME;
+  muteBtn.textContent = audioMuted ? '🔇' : '🔊';
+  muteBtn.title = audioMuted ? 'Unmute' : 'Mute';
 });
 
 // ── Initial ambient bubbles ───────────────────────────────────────────────────
