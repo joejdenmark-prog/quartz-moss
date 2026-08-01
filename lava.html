@@ -1286,17 +1286,25 @@ const MAX_BUBBLES = 5;
 const bubblePool = [];
 function makeBubbleMaterial(){
   return new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
     uniforms: { uTime: lavaMaterial.uniforms.uTime },
     vertexShader: `
       varying vec2 vUv;
+      varying float vNy;
       void main(){
         vUv = uv;
+        // object-space normal.y — 1.0 at the crown, 0 at the equator (the
+        // silhouette edge as seen from this scene's straight-down camera).
+        // Used only for the edge alpha fade below, not for shading color.
+        vNy = normalize(normal).y;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `,
     fragmentShader: `
       precision mediump float;
       varying vec2 vUv;
+      varying float vNy;
       uniform float uTime;
 
       float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453123); }
@@ -1362,7 +1370,16 @@ function makeBubbleMaterial(){
         // river's own surface pasted onto a sphere.
         col *= 1.4;
 
-        gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+        // Soft edge blend — previously fully opaque everywhere, which made
+        // the bubble read as a separate object with a hard silhouette
+        // sitting on the lava rather than surface swelling up out of it.
+        // Fading alpha out toward the equator (the visible silhouette edge
+        // under this scene's straight-down camera) lets the real lava mesh
+        // underneath show through at the rim, so the boundary dissolves
+        // into the surrounding flow instead of cutting a clean circle.
+        float edgeAlpha = smoothstep(-0.05, 0.55, vNy);
+
+        gl_FragColor = vec4(clamp(col, 0.0, 1.0), edgeAlpha);
       }
     `,
   });
@@ -1385,7 +1402,9 @@ function trySpawnBubble(){
   if (!item) return;
   const z = range(-ORTHO_H*0.8, ORTHO_H*0.8);
   const x = centerX(z) + range(-0.7, 0.7) * halfWidth(z);
-  const maxR = range(0.19, 0.31);
+  // Raised from 0.19-0.31 so bubbles read as more noticeable/prominent when
+  // they appear. Spawn locations (the two lines above) are unchanged.
+  const maxR = range(0.30, 0.47);
   item.active = true; activeBubbleCount++;
   // Grow duration roughly doubled (was 2.0-3.4s) — a slower, more organic
   // swell that matches this scene's relaxed pacing rather than visibly
@@ -1449,12 +1468,12 @@ function makeRadialTexture(inner, outer, size=64){
 }
 const splashTex = makeRadialTexture('rgba(90,10,5,0.7)', 'rgba(50,4,2,0)');
 const smokeTex  = makeRadialTexture('rgba(60,8,8,0.45)', 'rgba(25,4,4,0)');
-// Distinct, more opaque texture for pop-triggered smoke — the ambient
-// smokeTex above is deliberately faint (0.45 inner alpha) for its own
-// small wisps, which was compounding with a low peak-alpha cap in
-// updateSmoke to make pop-smoke nearly invisible even at a bigger size.
-// Same dark maroon hue family, just far less transparent at its core.
-const popSmokeTex = makeRadialTexture('rgba(70,11,10,0.85)', 'rgba(30,5,5,0)');
+// Distinct texture for pop-triggered smoke — the ambient smokeTex above is
+// deliberately faint and reddish for its own small wisps; that same color
+// (even at a higher peak alpha, tried in the last pass) still read as a
+// warm tint rather than actual smoke. This is a genuine dark neutral gray,
+// near-opaque at the core, so a pop reads as a real puff of steam/smoke.
+const popSmokeTex = makeRadialTexture('rgba(22,20,20,0.97)', 'rgba(14,13,13,0)');
 // Hot yellow-white ember core (rather than reusing splashTex's softer,
 // darker-orange radial) so burst fragments stay visible with additive
 // blending even when spawned over the lava river's own already-bright
@@ -1539,8 +1558,8 @@ function spawnBurst(x, z){
     item.data = {
       x, z, y: 1.5,
       vx: Math.cos(ang)*outSpeed, vz: Math.sin(ang)*outSpeed, vy: upSpeed,
-      life: 0, maxLife: 0.42 + Math.random()*0.24,
-      size: 0.16 + Math.random()*0.12,
+      life: 0, maxLife: 0.48 + Math.random()*0.26,
+      size: 0.24 + Math.random()*0.16,
     };
     item.sprite.visible = true;
     item.sprite.position.set(x, 1.5, z);
@@ -1599,13 +1618,13 @@ function spawnSmoke(){
 }
 // Spawned specifically when a bubble pops (see updateBubbles), on top of —
 // not instead of — the ambient drift-smoke above. Shares updateSmoke's
-// animation, but with its own texture (popSmokeTex — more opaque at the
-// core than the deliberately-faint ambient smokeTex) and a much higher
-// peakAlpha, plus a noticeably bigger size and longer lifetime. The first
-// pass reused smokeTex and updateSmoke's hardcoded 0.28 peak-alpha cap
-// outright — between that low cap and smokeTex's own low 0.45 texture
-// alpha, the effective opacity topped out around 0.13, barely visible
-// against the lava regardless of how big the puff was.
+// animation, but with its own texture (popSmokeTex, now a genuine dark
+// gray/near-black rather than a reddish tint) and a near-opaque peakAlpha,
+// plus a substantially bigger size and longer lifetime. Two earlier passes
+// were still too subtle: the first reused smokeTex with updateSmoke's
+// hardcoded 0.28 peak-alpha cap outright (effective opacity ~0.13); the
+// second raised the cap and size but kept a reddish tint, which still read
+// as a warm haze rather than actual smoke.
 function spawnPopSmoke(x, z){
   const count = 1 + Math.floor(Math.random()*2); // 1-2 puffs per pop
   let spawned = 0;
@@ -1616,8 +1635,8 @@ function spawnPopSmoke(x, z){
     item.sprite.material.map = popSmokeTex;
     item.data = {
       x: px, z: pz, driftX: range(-0.06,0.06), driftZ: range(-0.03,0.08),
-      life: 0, maxLife: range(6.5,9.5), startSize: range(0.9,1.2), endSize: range(3.2,4.2),
-      peakAlpha: 0.72,
+      life: 0, maxLife: range(6.5,9.5), startSize: range(1.3,1.7), endSize: range(4.6,6.0),
+      peakAlpha: 0.92,
     };
     item.sprite.visible = true;
     item.sprite.position.set(px, 1.2, pz);
