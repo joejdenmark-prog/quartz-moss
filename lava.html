@@ -1474,17 +1474,20 @@ function makeRadialTexture(inner, outer, size=64){
 // sprites a wispy, uneven silhouette rather than a stack of perfect
 // circles. Baked once and reused (cheap); "rgb" is an "r,g,b" string.
 //
-// Two rounds ago this was 5 loosely-scattered soft-edged blobs, which read
-// as one smooth soft-focus smudge rather than actual cloud structure —
-// each blob faded gradually across its whole radius (0 -> 1 alpha, linear),
-// so overlapping blobs just blurred together instead of showing distinct
-// rounded bumps. Rebuilt around a real reference-image cumulus/cauliflower
-// shape: a tight core cluster of large lobes (the cloud's solid main body)
-// plus a ring of smaller lobes bulging off that core's rim (the individual
-// puffy bumps that give a cauliflower its texture). Each lobe now holds
-// near-flat alpha out to ~65% of its own radius before falling off, so
-// lobes read as distinct rounded puffs with real edges instead of a soft
-// gaussian blur — that edge definition is what a flat blur can't produce.
+// Three rounds ago this was 5 loosely-scattered soft-edged blobs, which
+// read as one smooth soft-focus smudge — each blob faded gradually across
+// its whole radius, so overlapping blobs just blurred together. The next
+// pass added a "core cluster + 9 tiny rim bumps" structure, but the rim
+// bumps were too small to read at actual in-scene size. The pass after that
+// fixed size but placed lobes at perfectly EVEN angular spacing around a
+// center point — a live screenshot check showed that reads as a regular
+// rosette/flower/gear icon (a very recognizable, too-symmetric pattern),
+// not an organic cloud; reference cumulus photos are irregular, with lobes
+// clumped unevenly off each other, not radiating evenly from one point.
+// Rebuilt with an organic random-walk cluster instead: each new lobe
+// attaches next to a randomly-chosen EXISTING lobe (not a fixed center) at
+// a random angle and distance, so the silhouette grows asymmetrically like
+// a real cauliflower head rather than a spoked wheel.
 function makeWispyTexture(rgb, size=110){
   const cnv = document.createElement('canvas'); cnv.width = cnv.height = size;
   const ctx = cnv.getContext('2d');
@@ -1492,31 +1495,34 @@ function makeWispyTexture(rgb, size=110){
   function puff(bx, by, br, a){
     const g = ctx.createRadialGradient(bx,by,0, bx,by,br);
     g.addColorStop(0,    `rgba(${rgb},${a})`);
-    g.addColorStop(0.65, `rgba(${rgb},${a})`);
+    g.addColorStop(0.55, `rgba(${rgb},${a})`);
+    g.addColorStop(0.8,  `rgba(${rgb},${(a*0.45).toFixed(2)})`);
     g.addColorStop(1,    `rgba(${rgb},0)`);
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI*2); ctx.fill();
   }
-  // Core body — a handful of large, tightly overlapping lobes clustered
-  // near the center, forming the cloud's solid main mass.
-  const coreCount = 5;
-  for (let i = 0; i < coreCount; i++) {
-    const ang = (Math.PI*2*i/coreCount) + (Math.random()-0.5)*0.8;
-    const dist = size*(0.06 + Math.random()*0.08);
-    const bx = cx + Math.cos(ang)*dist, by = cy + Math.sin(ang)*dist*0.85;
-    const br = size*(0.24 + Math.random()*0.10);
-    puff(bx, by, br, 0.55 + Math.random()*0.2);
+  const lobeCount = 6 + Math.floor(Math.random()*3); // 6-8
+  const lobes = [{ x: cx, y: cy, r: size*(0.22 + Math.random()*0.06) }];
+  for (let i = 1; i < lobeCount; i++) {
+    const parent = lobes[Math.floor(Math.random()*lobes.length)];
+    const ang = Math.random()*Math.PI*2;
+    const r = size*(0.15 + Math.random()*0.09);
+    // overlap 45-70% of the combined radius with its parent lobe, so new
+    // lobes bulge off an existing one rather than floating disconnected.
+    const dist = (parent.r + r) * (0.45 + Math.random()*0.25);
+    let bx = parent.x + Math.cos(ang)*dist, by = parent.y + Math.sin(ang)*dist*0.9;
+    // a random walk can drift several steps in the same rough direction and
+    // wander off-canvas; clamp each lobe's distance from the texture center
+    // so the whole cluster stays contained within the baked canvas.
+    const fromCenter = Math.hypot(bx-cx, by-cy);
+    const maxFromCenter = size*0.34;
+    if (fromCenter > maxFromCenter) {
+      const s = maxFromCenter / fromCenter;
+      bx = cx + (bx-cx)*s; by = cy + (by-cy)*s;
+    }
+    lobes.push({ x: bx, y: by, r });
   }
-  // Rim bumps — smaller lobes bulging outward off the core, giving the
-  // silhouette its lobed, cauliflower-like edge instead of one smooth curve.
-  const bumpCount = 9;
-  for (let i = 0; i < bumpCount; i++) {
-    const ang = (Math.PI*2*i/bumpCount) + (Math.random()-0.5)*0.6;
-    const dist = size*(0.22 + Math.random()*0.13);
-    const bx = cx + Math.cos(ang)*dist, by = cy + Math.sin(ang)*dist*0.9;
-    const br = size*(0.09 + Math.random()*0.08);
-    puff(bx, by, br, 0.4 + Math.random()*0.25);
-  }
+  for (const l of lobes) puff(l.x, l.y, l.r, 0.6 + Math.random()*0.2);
   const tex = new THREE.CanvasTexture(cnv);
   tex.needsUpdate = true;
   return tex;
@@ -1532,16 +1538,16 @@ const smokeTex  = makeRadialTexture('rgba(60,8,8,0.45)', 'rgba(25,4,4,0)');
 // circle) so overlapping/rotating puffs read as curling tendrils rather
 // than a stack of flat gray discs.
 const popSmokeTex = makeWispyTexture('22,20,20');
-// Pure white-hot core (rather than the previous pale yellow-orange) so
-// burst fragments stay visible with additive blending even when spawned
-// over the lava river's own already-bright orange surface — a live
-// in-browser check (spawning a real pop via the production code path and
-// reading back sprite opacity/position, then screenshotting) showed the
-// old yellow-orange core barely added any contrast against the similarly-
-// colored lava once its opacity had faded partway: additive orange-on-
-// orange reads as "slightly brighter orange," not a distinct spark. White
-// additively blended onto orange reads as a clearly distinct hot glint.
-const burstTex = makeRadialTexture('rgba(255,255,255,0.95)', 'rgba(255,120,40,0)');
+// Warm orange-yellow molten-droplet core, color-matched to this scene's own
+// hot-lava palette (the tap-fill crack glow's brightest core stop is
+// #ff700a / rgb(255,112,10), and the river shader's own brightest
+// "hottestCore" value is ~rgb(255,204,71)) rather than a neutral white
+// spark — so a fragment reads as a glowing bit of molten rock, consistent
+// with the rest of the scene, not a cool flash. Contrast against the lava
+// background comes from the opacity curve in updateBurst below (fragments
+// hold near-full opacity through their active separation phase) rather
+// than from the color itself, so this can be warm without going invisible.
+const burstTex = makeRadialTexture('rgba(255,204,71,0.95)', 'rgba(255,90,10,0)');
 
 function makeSpritePool(count, texture, blending){
   const pool = [];
@@ -1565,6 +1571,14 @@ const smokePool  = makeSpritePool(56, smokeTex, THREE.NormalBlending);
 // (pure radial scatter at a fixed height). Uses the brighter burstTex (not
 // splashTex) so it reads as a distinct hot ember against the lava.
 const burstPool = makeSpritePool(24, burstTex, THREE.AdditiveBlending);
+// This scene renders with ACES Filmic tone mapping (confirmed via
+// renderer.toneMapping), which compresses/desaturates bright highlights —
+// a live pixel readback showed burstTex's warm rgb(255,204,71) core was
+// landing on-screen as rgb(255,254,168), nearly indistinguishable from the
+// plain white it was meant to replace. Exempting just this pool's sprites
+// from tone mapping (not the renderer setting itself, which the rest of
+// the scene still uses) lets the specified warm color render as-authored.
+for (const item of burstPool) item.sprite.material.toneMapped = false;
 
 // ── Splash particles (bubble pops) ───────────────────────────────────────────
 function spawnSplash(x, z, count){
