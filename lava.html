@@ -1583,8 +1583,11 @@ const smokePool  = makeSpritePool(56, smokeTex, THREE.NormalBlending);
 // Small upward-arcing eruption fragments — a new, separate pool from the
 // existing flat splash particles below, since those never move in Y at all
 // (pure radial scatter at a fixed height). Uses the brighter burstTex (not
-// splashTex) so it reads as a distinct hot ember against the lava.
-const burstPool = makeSpritePool(24, burstTex, THREE.AdditiveBlending);
+// splashTex) so it reads as a distinct hot ember against the lava. Raised
+// from 24 — bursts now spawn more fragments per pop (below), and tap-to-pop
+// means multiple pops can land close together, so headroom avoids pool
+// exhaustion silently dropping fragments.
+const burstPool = makeSpritePool(48, burstTex, THREE.AdditiveBlending);
 // This scene renders with ACES Filmic tone mapping (confirmed via
 // renderer.toneMapping), which compresses/desaturates bright highlights —
 // a live pixel readback showed burstTex's warm rgb(255,204,71) core was
@@ -1645,7 +1648,7 @@ function updateSplashes(dt){
 const BURST_GRAVITY = 6.0;
 const BURST_STREAK_ALONG = 1.22, BURST_STREAK_ACROSS = 0.82; // ~1.0 combined area, size-neutral
 function spawnBurst(x, z){
-  const count = 5 + Math.floor(Math.random()*3); // 5-7 fragments, unchanged
+  const count = 9 + Math.floor(Math.random()*5); // 9-13 fragments — more, smaller pieces per pop
   let spawned = 0;
   for (const item of burstPool) {
     if (item.active) continue;
@@ -1663,7 +1666,12 @@ function spawnBurst(x, z){
       vx: Math.cos(ang) * outSpeed, vz: Math.sin(ang) * outSpeed,
       vy0, flightTime, fadeDur,
       life: 0, maxLife: flightTime + fadeDur,
-      size: 0.16 + Math.random() * 0.1,
+      // Widened from a narrow 0.16-0.26 band to 0.08-0.32 — some fragments
+      // now read as noticeably smaller flecks and others as slightly
+      // larger globs, so a burst reads as a textured little splash rather
+      // than a cluster of uniform dots. Speed/spread ranges above are
+      // unchanged, so the overall spray still covers the same footprint.
+      size: 0.08 + Math.random() * 0.24,
     };
     item.sprite.visible = true;
     item.sprite.position.set(x, 1.5, z);
@@ -1885,11 +1893,31 @@ function pickRiver(e){
   const hits = raycaster.intersectObject(lavaMesh);
   return hits.length ? hits[0] : null;
 }
+// Bubbles are individual (non-instanced) meshes, so they can be raycast
+// directly as a group — only active ones are hit-testable, matching what's
+// actually visible/tappable on screen.
+function pickBubble(e){
+  raycaster.setFromCamera(ndcFromEvent(e), camera);
+  const meshes = bubblePool.filter(b => b.active).map(b => b.mesh);
+  const hits = raycaster.intersectObjects(meshes);
+  if (!hits.length) return null;
+  return bubblePool.find(b => b.mesh === hits[0].object) || null;
+}
 
 let boulderDownId = null, boulderDownTime = 0, boulderDownX = 0, boulderDownY = 0;
 let holdTimer = null;
 const HOLD_MS = 220;
 let lastBoulderHitPoint = new THREE.Vector3();
+// Tap-to-pop tracking for bubbles — separate from the boulder tap-fill
+// above (which fires immediately on touch-down) because this needs to
+// distinguish a genuine tap from the start of a drag-streak gesture: a
+// drag that happens to start on a bubble's position must still produce
+// only the streak effect, never a burst. So this only *records* the
+// candidate on pointerdown, and the pop is decided on pointerup once we
+// know the gesture stayed within a small movement/time budget.
+let bubbleDownItem = null, bubbleDownTime = 0, bubbleDownX = 0, bubbleDownY = 0, bubbleDownPointerId = null;
+const BUBBLE_TAP_MOVE_SQ = 400; // same 20px budget as the boulder tap cancel above
+const BUBBLE_TAP_MS = 300;
 
 canvas.addEventListener('pointerdown', (e) => {
   const hit = pickBoulder(e);
@@ -1905,6 +1933,16 @@ canvas.addEventListener('pointerdown', (e) => {
     triggerCrack(hit.instanceId, hit.point);
     return;
   }
+  const bubbleHit = pickBubble(e);
+  if (bubbleHit) {
+    bubbleDownItem = bubbleHit;
+    bubbleDownTime = performance.now();
+    bubbleDownX = e.clientX; bubbleDownY = e.clientY;
+    bubbleDownPointerId = e.pointerId;
+  }
+  // Deliberately no `return` here even when a bubble was hit — a drag that
+  // starts on top of a bubble must still be free to become a normal
+  // river drag-streak below, exactly as it does anywhere else on the river.
   const riverHit = pickRiver(e);
   if (riverHit) {
     const slotIndex = dragSlots.findIndex(s => !s.active);
@@ -1926,6 +1964,13 @@ canvas.addEventListener('pointermove', (e) => {
       boulderDownId = null;
     }
   }
+  // Movement beyond the tap budget means this has become a drag, not a
+  // tap — cancel the pending bubble-pop candidacy (the gesture continues
+  // on, if anything, as a normal drag-streak via the block below).
+  if (bubbleDownItem !== null && e.pointerId === bubbleDownPointerId) {
+    const dx = e.clientX - bubbleDownX, dy = e.clientY - bubbleDownY;
+    if (dx*dx + dy*dy > BUBBLE_TAP_MOVE_SQ) bubbleDownItem = null;
+  }
   const slotIndex = dragSlots.findIndex(s => s.active && s.pointerId === e.pointerId);
   if (slotIndex !== -1) {
     const slot = dragSlots[slotIndex];
@@ -1945,6 +1990,23 @@ canvas.addEventListener('pointermove', (e) => {
 function releasePointer(e){
   clearTimeout(holdTimer);
   boulderDownId = null;
+  if (bubbleDownItem !== null && e.pointerId === bubbleDownPointerId) {
+    const dx = e.clientX - bubbleDownX, dy = e.clientY - bubbleDownY;
+    const withinTapBudget = (performance.now() - bubbleDownTime) <= BUBBLE_TAP_MS
+      && dx*dx + dy*dy <= BUBBLE_TAP_MOVE_SQ;
+    // Re-check the bubble is still the same live, still-growing bubble —
+    // it's still active and in its 'grow' phase, not already popping or
+    // long since reused by a different spawn — before short-circuiting it
+    // straight into the exact same pop phase its own timer would enter.
+    // Everything downstream (splash/smoke/burst spawn, deactivation, the
+    // next respawn) is the existing updateBubbles pop-completion code —
+    // tapping only ever moves a bubble into that same path sooner.
+    if (withinTapBudget && bubbleDownItem.active && bubbleDownItem.data.phase === 'grow') {
+      bubbleDownItem.data.phase = 'pop';
+      bubbleDownItem.data.popT = 0;
+    }
+  }
+  bubbleDownItem = null;
   const slot = dragSlots.find(s => s.pointerId === e.pointerId);
   if (slot) { slot.active = false; slot.pointerId = null; }
 }
