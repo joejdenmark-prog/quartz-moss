@@ -1464,6 +1464,7 @@ function updateBubbles(dt){
         spawnSplash(d.x, d.z, 10 + Math.floor(Math.random()*5));
         spawnPopSmoke(d.x, d.z);
         spawnBurst(d.x, d.z);
+        playPopSound();
         item.active = false; item.mesh.visible = false; item.shadow.visible = false; activeBubbleCount--;
         setTimeout(trySpawnBubble, 200 + Math.random()*900);
       }
@@ -2130,6 +2131,37 @@ function startAmbientAudio(){
       scheduleLoopIteration(audioCtx.currentTime, startS, endS - startS);
     })
     .catch(() => {}); // if the file can't load/decode, the scene continues silently
+  loadPopSound();
+}
+
+// ── Bubble-pop sound effect ──────────────────────────────────────────────────
+// A separate one-shot SFX layered on top of the ambient loop above, sharing
+// the same AudioContext (created on the same first-tap unlock, so this
+// never needs its own separate interaction) and the same mute toggle, but
+// with its own independent gain so its level can be tuned on its own.
+const POP_VOLUME = 0.6; // 0-1, independent of AMBIENT_VOLUME — adjust freely
+let popBuffer = null, popGain = null;
+
+function loadPopSound(){
+  popGain = audioCtx.createGain();
+  popGain.gain.value = audioMuted ? 0 : POP_VOLUME;
+  popGain.connect(audioCtx.destination);
+  fetch('audio/bubble-pop.mp3')
+    .then(r => r.arrayBuffer())
+    .then(buf => audioCtx.decodeAudioData(buf))
+    .then(decoded => { popBuffer = decoded; })
+    .catch(() => {}); // if the file can't load/decode, pops just stay silent
+}
+
+// Each call makes a fresh, single-use AudioBufferSourceNode — the standard
+// Web Audio pattern for one-shot SFX — so simultaneous pops each get their
+// own independent playback and don't cut each other off.
+function playPopSound(){
+  if (!audioCtx || !popBuffer || !popGain) return; // not unlocked/loaded yet — silently skip
+  const src = audioCtx.createBufferSource();
+  src.buffer = popBuffer;
+  src.connect(popGain);
+  src.start(0);
 }
 // Browsers block audio until a user gesture — start (or resume, if the
 // context already exists but iOS left it suspended) on the very first
@@ -2144,6 +2176,7 @@ window.addEventListener('pointerdown', () => {
 muteBtn.addEventListener('click', () => {
   audioMuted = !audioMuted;
   if (audioGain) audioGain.gain.value = audioMuted ? 0 : AMBIENT_VOLUME;
+  if (popGain) popGain.gain.value = audioMuted ? 0 : POP_VOLUME;
   muteBtn.textContent = audioMuted ? '🔇' : '🔊';
   muteBtn.title = audioMuted ? 'Unmute' : 'Mute';
 });
