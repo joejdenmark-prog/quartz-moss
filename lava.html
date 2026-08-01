@@ -1627,21 +1627,25 @@ function updateSplashes(dt){
 
 // ── Small eruption burst (bubble pops) ───────────────────────────────────────
 // Individual fragments that visibly separate from the pop point in a radial
-// spray, distinct from the bubble's own brief pop-scale bump. The previous
-// version gave each fragment an upward velocity plus gravity, but this
-// scene's camera looks straight down through an ORTHOGRAPHIC projection —
-// under orthographic projection, a world-Y change moves an object only in
-// depth (affecting occlusion order), never in screen-space position, so
-// that "arc" was completely invisible on screen; combined with a fairly
-// modest horizontal speed, fragments barely read as separating from the
-// bubble's own flash before fading. Rebuilt around what's actually visible:
-// a much wider, evenly-spaced horizontal spray so each fragment reads as a
-// distinct moving piece, plus a scale pulse (grow then shrink over its
-// life) standing in for the rise-and-fall an orthographic top-down view
-// can't otherwise convey. Still kept small/brief/restrained — a handful of
-// fragments, well under a second.
+// spray, distinct from the bubble's own brief pop-scale bump. This scene's
+// camera looks straight down through an ORTHOGRAPHIC projection, where a
+// world-Y change moves an object only in depth (occlusion order), never in
+// screen-space position — so a real vertical position can never be *shown*
+// directly here. Fragments still run genuine launch-speed + gravity physics
+// (real vy0, real gravity, a real parabolic height(t)), but that computed
+// height drives the sprite's SCALE (bigger near the apex, back to baseline
+// at landing) rather than a Y position, since scale is the only channel
+// this projection can actually render an "up and down" through. Horizontal
+// motion (the part of a real ballistic arc that top-down projection *can*
+// show) runs at each fragment's own constant launch speed for as long as
+// it's "airborne," then stops the instant it "lands" — which is also when
+// the fade begins, so it reads as landing and settling rather than winking
+// out mid-air. A slight stretch along the direction of travel, oriented via
+// the sprite's own rotation, sells a droplet in motion rather than a dot.
+const BURST_GRAVITY = 6.0;
+const BURST_STREAK_ALONG = 1.22, BURST_STREAK_ACROSS = 0.82; // ~1.0 combined area, size-neutral
 function spawnBurst(x, z){
-  const count = 5 + Math.floor(Math.random()*3); // 5-7 fragments
+  const count = 5 + Math.floor(Math.random()*3); // 5-7 fragments, unchanged
   let spawned = 0;
   for (const item of burstPool) {
     if (item.active) continue;
@@ -1649,18 +1653,23 @@ function spawnBurst(x, z){
     // fully random per-fragment, so they reliably spray outward in
     // different directions instead of occasionally clumping together.
     const ang = (Math.PI * 2 * spawned / count) + range(-0.35, 0.35);
-    const outSpeed = 0.9 + Math.random() * 0.7;
+    const outSpeed = 0.7 + Math.random() * 1.1; // per-fragment horizontal launch speed
+    const vy0 = 1.0 + Math.random() * 0.8;      // per-fragment vertical launch speed
+    const flightTime = 2 * vy0 / BURST_GRAVITY; // real ballistic time-of-flight
+    const fadeDur = 0.15 + Math.random() * 0.08;
     item.active = true;
     item.data = {
       x, z,
       vx: Math.cos(ang) * outSpeed, vz: Math.sin(ang) * outSpeed,
-      life: 0, maxLife: 0.5 + Math.random() * 0.3,
+      vy0, flightTime, fadeDur,
+      life: 0, maxLife: flightTime + fadeDur,
       size: 0.16 + Math.random() * 0.1,
     };
     item.sprite.visible = true;
     item.sprite.position.set(x, 1.5, z);
     item.sprite.material.opacity = 1.0;
-    item.sprite.scale.setScalar(item.data.size);
+    item.sprite.material.rotation = -ang;
+    item.sprite.scale.set(item.data.size*BURST_STREAK_ALONG, item.data.size*BURST_STREAK_ACROSS, 1);
     spawned++;
     if (spawned >= count) break;
   }
@@ -1670,24 +1679,27 @@ function updateBurst(dt){
     if (!item.active) continue;
     const d = item.data;
     d.life += dt;
-    const tt = d.life / d.maxLife;
-    if (tt >= 1) { item.active = false; item.sprite.visible = false; continue; }
-    d.x += d.vx*dt; d.z += d.vz*dt;
-    item.sprite.position.set(d.x, 1.5, d.z);
-    // Scale pulse — bigger mid-flight, smaller at both the start and the
-    // end (a half sine over the fragment's life) — the visible stand-in for
-    // a rise-then-fall arc.
-    const arc = 1.0 + Math.sin(Math.min(1, tt) * Math.PI) * 0.5;
-    // Previously faded linearly from the very first frame (opacity = 1-tt),
-    // so by the time fragments had visibly separated from the pop point
-    // they were already down around 0.3-0.4 opacity — combined with
-    // additive blending on a bright, similarly-colored background, a live
-    // test confirmed that made them nearly invisible mid-flight despite
-    // being spawned and moving correctly. Hold near-full brightness through
-    // the active separation phase instead, then fade over the back half.
-    const opacity = tt < 0.4 ? 1.0 : 1.0 * (1 - (tt-0.4)/0.6);
-    item.sprite.material.opacity = opacity;
-    item.sprite.scale.setScalar(d.size * arc);
+    if (d.life >= d.maxLife) { item.active = false; item.sprite.visible = false; continue; }
+    if (d.life < d.flightTime) {
+      // airborne — horizontal position advances at constant launch speed;
+      // scale follows the real parabolic height (0 at launch, peak at the
+      // arc's apex, back to 0 at landing), same 1.0-1.5x range as the
+      // previous scale-pulse so this stays a motion change, not a size one.
+      d.x += d.vx*dt; d.z += d.vz*dt;
+      item.sprite.position.set(d.x, 1.5, d.z);
+      const peakHeight = (d.vy0*d.vy0) / (2*BURST_GRAVITY);
+      const height = d.vy0*d.life - 0.5*BURST_GRAVITY*d.life*d.life;
+      const heightScale = 1.0 + Math.max(0, height/peakHeight) * 0.5;
+      item.sprite.scale.set(d.size*heightScale*BURST_STREAK_ALONG, d.size*heightScale*BURST_STREAK_ACROSS, 1);
+      item.sprite.material.opacity = 1.0;
+    } else {
+      // landed — hold position, drop the travel streak (it's no longer
+      // moving), and fade out over a short settle window instead of
+      // disappearing mid-flight.
+      item.sprite.scale.set(d.size, d.size, 1);
+      const fadeT = (d.life - d.flightTime) / d.fadeDur;
+      item.sprite.material.opacity = Math.max(0, 1.0 - fadeT);
+    }
   }
 }
 
