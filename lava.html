@@ -1548,6 +1548,20 @@ const popSmokeTex = makeWispyTexture('22,20,20');
 // hold near-full opacity through their active separation phase) rather
 // than from the color itself, so this can be warm without going invisible.
 const burstTex = makeRadialTexture('rgba(255,204,71,0.95)', 'rgba(255,90,10,0)');
+// The real bug behind every previous "still looks white" report: this
+// texture's colorSpace was never set, so three.js treated its canvas-drawn
+// rgba() values (which are authored in sRGB/display space, like any CSS
+// color) as already-LINEAR data. Sampling skipped the sRGB->linear
+// decode that should happen on read, so the color went through the
+// pipeline once "hotter" than intended, then got sRGB-encoded again on
+// final output — a double gamma pass. Confirmed via a raw pixel readback
+// of the canvas (correct: ~254,200,69) vs. the same fragment's on-screen
+// composited pixel (245,238-252,131-134 — G and especially B pulled far
+// toward R, reading as near-white) with no colorSpace set. No other
+// texture in this file sets colorSpace either, but burst is the one
+// that's additively blended at near-full opacity, which is what makes the
+// effect this visible. Scoped to burstTex only.
+burstTex.colorSpace = THREE.SRGBColorSpace;
 
 function makeSpritePool(count, texture, blending){
   const pool = [];
