@@ -2163,6 +2163,90 @@ function playPopSound(){
   src.connect(popGain);
   src.start(0);
 }
+
+function playBubblePop() {
+  if (!audioCtx) return;
+  const ctx     = audioCtx;
+  const now     = ctx.currentTime;
+  const depth   = 0.80, pitch = 0.25, drop = 0.75, sharp = 0.40;
+  const decay   = 0.65, gurgle = 0.75, gspeed = 0.30, wet = 1.0;
+  const thick   = 1.0, tail = 0.60, riselen = 0.55;
+  const rumble  = 0.65, rdecay = 0.70, echo = 0.35, esize = 0.50, vol = 0.65;
+
+  const master = ctx.createGain(); master.gain.value = vol * 0.9;
+  const rev  = ctx.createDelay(0.5); rev.delayTime.value = 0.03 + esize * 0.18;
+  const rfb  = ctx.createGain(); rfb.gain.value = echo * 0.28;
+  const rwet = ctx.createGain(); rwet.gain.value = echo * 0.38;
+  const rdry = ctx.createGain(); rdry.gain.value = 1.0;
+  master.connect(rdry); master.connect(rev);
+  rev.connect(rfb); rfb.connect(rev); rev.connect(rwet);
+  rdry.connect(ctx.destination); rwet.connect(ctx.destination);
+
+  const baseFreq  = 30 + pitch * 100 + (1 - depth) * 60;
+  const bodyDecay = 0.08 + decay * 0.22;
+
+  const osc1 = ctx.createOscillator(); const og1 = ctx.createGain();
+  const thickFilt = ctx.createBiquadFilter();
+  thickFilt.type = 'lowpass'; thickFilt.frequency.value = 150 + thick * 500;
+  osc1.type = 'sine';
+  osc1.frequency.setValueAtTime(baseFreq * (1.8 + sharp * 0.8), now);
+  osc1.frequency.exponentialRampToValueAtTime(baseFreq * (0.5 - drop * 0.3), now + bodyDecay);
+  og1.gain.setValueAtTime(0, now);
+  og1.gain.linearRampToValueAtTime(0.5 + sharp * 0.25, now + 0.002);
+  og1.gain.exponentialRampToValueAtTime(0.0001, now + bodyDecay * 1.4);
+  osc1.connect(thickFilt); thickFilt.connect(og1); og1.connect(master);
+  osc1.start(now); osc1.stop(now + 0.5);
+
+  const lfo  = ctx.createOscillator(); const lfoG = ctx.createGain();
+  const osc2 = ctx.createOscillator(); const og2  = ctx.createGain();
+  const gf   = ctx.createBiquadFilter();
+  lfo.frequency.value = 5 + gspeed * 25;
+  lfoG.gain.value = baseFreq * gurgle * 0.9;
+  lfo.connect(lfoG); lfoG.connect(osc2.frequency);
+  osc2.type = 'sawtooth';
+  osc2.frequency.setValueAtTime(baseFreq * 0.75, now);
+  osc2.frequency.exponentialRampToValueAtTime(baseFreq * 0.25, now + bodyDecay * 1.2);
+  gf.type = 'lowpass'; gf.frequency.value = 120 + thick * 300;
+  og2.gain.setValueAtTime(0, now);
+  og2.gain.linearRampToValueAtTime(gurgle * 0.4, now + 0.004);
+  og2.gain.exponentialRampToValueAtTime(0.0001, now + bodyDecay * 1.6);
+  osc2.connect(gf); gf.connect(og2); og2.connect(master);
+  lfo.start(now); osc2.start(now); lfo.stop(now+0.5); osc2.stop(now+0.5);
+
+  const n  = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.05), ctx.sampleRate);
+  const nd = n.getChannelData(0);
+  for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+  const nSrc = ctx.createBufferSource(); nSrc.buffer = n;
+  const nf = ctx.createBiquadFilter(); nf.type = 'bandpass';
+  nf.frequency.value = 200 + wet * 600 + thick * 200; nf.Q.value = 1.2 + thick;
+  const ng = ctx.createGain();
+  ng.gain.setValueAtTime(wet * 0.28, now);
+  ng.gain.exponentialRampToValueAtTime(0.0001, now + 0.04);
+  nSrc.connect(nf); nf.connect(ng); ng.connect(master);
+  nSrc.start(now); nSrc.stop(now + 0.055);
+
+  const riseLen = 0.03 + riselen * 0.12;
+  const osc3 = ctx.createOscillator(); const og3 = ctx.createGain();
+  osc3.type = 'sine';
+  osc3.frequency.setValueAtTime(baseFreq * 0.3, now - riseLen);
+  osc3.frequency.linearRampToValueAtTime(baseFreq * 1.1, now);
+  og3.gain.setValueAtTime(0, now - riseLen);
+  og3.gain.linearRampToValueAtTime(tail * 0.18, now - riseLen * 0.3);
+  og3.gain.linearRampToValueAtTime(0, now + 0.008);
+  osc3.connect(og3); og3.connect(master);
+  osc3.start(Math.max(0, now - riseLen)); osc3.stop(now + 0.015);
+
+  const osc4 = ctx.createOscillator(); const og4 = ctx.createGain();
+  const rf   = ctx.createBiquadFilter(); rf.type = 'lowpass'; rf.frequency.value = 60 + thick * 80;
+  osc4.type = 'triangle';
+  osc4.frequency.setValueAtTime(baseFreq * 0.3, now);
+  osc4.frequency.exponentialRampToValueAtTime(baseFreq * 0.15, now + 0.2 + rdecay * 0.3);
+  og4.gain.setValueAtTime(0, now);
+  og4.gain.linearRampToValueAtTime(rumble * 0.32, now + 0.008);
+  og4.gain.exponentialRampToValueAtTime(0.0001, now + 0.2 + rdecay * 0.35);
+  osc4.connect(rf); rf.connect(og4); og4.connect(master);
+  osc4.start(now); osc4.stop(now + 0.6);
+}
 // Browsers block audio until a user gesture — start (or resume, if the
 // context already exists but iOS left it suspended) on the very first
 // pointerdown anywhere on the page. Separate, passive, one-time listener so
