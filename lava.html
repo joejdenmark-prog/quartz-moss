@@ -1237,6 +1237,7 @@ function triggerCrack(id, hitPoint){
     }
   }
   heatArray[id] = 1.0;
+  playCrackFillSound(); // fires the instant the fill (re)starts, in both branches above
 }
 
 function handleBoulderTap(id){
@@ -2132,6 +2133,7 @@ function startAmbientAudio(){
     })
     .catch(() => {}); // if the file can't load/decode, the scene continues silently
   loadPopSound();
+  loadCrackFillSound();
 }
 
 // ── Bubble-pop sound effect ──────────────────────────────────────────────────
@@ -2161,6 +2163,40 @@ function playPopSound(){
   const src = audioCtx.createBufferSource();
   src.buffer = popBuffer;
   src.connect(popGain);
+  src.start(0);
+}
+
+// ── Boulder crack-fill sound effect ──────────────────────────────────────────
+// Same pattern as the bubble-pop SFX above (own gain node so it can be
+// tuned independently, shares the same AudioContext/mute state, no
+// separate unlock). The source file (crack-fill-trimmed.wav) is already
+// pre-trimmed to exactly 13.3s with a baked-in ~150ms fade-in/~400ms
+// fade-out, matching the tap-fill animation's full fill+hold+drain cycle
+// (5.0 + 1.8 + 6.5 = 13.3s, see updateBoulderHeat), so a single untouched
+// one-shot playback starting the instant the fill begins lines up with the
+// whole cycle on its own — no rate/loop tricks needed here.
+const CRACK_FILL_VOLUME = 0.6; // 0-1, independent of AMBIENT_VOLUME/POP_VOLUME — adjust freely
+let crackFillBuffer = null, crackFillGain = null;
+
+function loadCrackFillSound(){
+  crackFillGain = audioCtx.createGain();
+  crackFillGain.gain.value = audioMuted ? 0 : CRACK_FILL_VOLUME;
+  crackFillGain.connect(audioCtx.destination);
+  fetch('audio/crack-fill-trimmed.wav')
+    .then(r => r.arrayBuffer())
+    .then(buf => audioCtx.decodeAudioData(buf))
+    .then(decoded => { crackFillBuffer = decoded; })
+    .catch(() => {}); // if the file can't load/decode, taps just stay silent
+}
+
+// Fresh single-use source per call, same as playPopSound — so tapping
+// several boulders close together lets each one's sound play out
+// independently rather than cutting off an already-playing one.
+function playCrackFillSound(){
+  if (!audioCtx || !crackFillBuffer || !crackFillGain) return;
+  const src = audioCtx.createBufferSource();
+  src.buffer = crackFillBuffer;
+  src.connect(crackFillGain);
   src.start(0);
 }
 
@@ -2261,6 +2297,7 @@ muteBtn.addEventListener('click', () => {
   audioMuted = !audioMuted;
   if (audioGain) audioGain.gain.value = audioMuted ? 0 : AMBIENT_VOLUME;
   if (popGain) popGain.gain.value = audioMuted ? 0 : POP_VOLUME;
+  if (crackFillGain) crackFillGain.gain.value = audioMuted ? 0 : CRACK_FILL_VOLUME;
   muteBtn.textContent = audioMuted ? '🔇' : '🔊';
   muteBtn.title = audioMuted ? 'Unmute' : 'Mute';
 });
