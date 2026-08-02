@@ -2138,13 +2138,13 @@ function startAmbientAudio(){
 // ── Boulder crack-fill sound effect ──────────────────────────────────────────
 // Same pattern as the bubble-pop SFX above (own gain node so it can be
 // tuned independently, shares the same AudioContext/mute state, no
-// separate unlock). The source file (crack-fill-trimmed.wav) is already
-// pre-trimmed to exactly 13.3s with a baked-in ~150ms fade-in/~400ms
-// fade-out, matching the tap-fill animation's full fill+hold+drain cycle
-// (5.0 + 1.8 + 6.5 = 13.3s, see updateBoulderHeat), so a single untouched
-// one-shot playback starting the instant the fill begins lines up with the
-// whole cycle on its own — no rate/loop tricks needed here.
-const CRACK_FILL_VOLUME = 0.6; // 0-1, independent of AMBIENT_VOLUME/POP_VOLUME — adjust freely
+// separate unlock). The source file (crack-fill-trimmed.wav) is pre-trimmed
+// to 11.9s (1.4s shorter than the tap-fill animation's own 13.3s
+// fill+hold+drain cycle, see updateBoulderHeat, so the sound now finishes
+// slightly before the visual drain completes) with a baked-in ~600ms
+// fade-in and ~2.5s fade-out. Playback is still a single untouched
+// one-shot starting the instant the fill begins — no rate/loop tricks.
+const CRACK_FILL_VOLUME = 0.3; // 0-1, independent of AMBIENT_VOLUME/POP_VOLUME — adjust freely
 let crackFillBuffer = null, crackFillGain = null;
 
 function loadCrackFillSound(){
