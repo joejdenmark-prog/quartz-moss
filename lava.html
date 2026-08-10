@@ -786,53 +786,51 @@ function makeBoulderTexture(seed, isVisible, crackPaths){
         // All colors here stay in the rock's own dark tonal range; the
         // tap-fill glow (a separate overlay texture, drawn additively on
         // top only once triggered) is what actually supplies color/light.
-        // Widened again (was 8, before that 5.5/4.5) — direct A/B testing
-        // (forcing a boulder's aRiverGlow attribute to 0 vs its real value)
-        // confirmed the river-adjacency glow and rim light in
-        // boulderMaterial's onBeforeCompile substantially wash out a lit
-        // facet's contrast, and even the previous, already-widened pass was
-        // still hard to make out on a brightly-lit boulder. Pushed further
-        // again, deliberately overshooting so there's headroom to dial back
-        // from a clearly-visible baseline instead of nudging up from one
-        // that's still marginal.
-        const off = 10;
+        // A previous pass deliberately overshot this (wide opaque strokes,
+        // a bold highlight rim) to guarantee visibility against the scene's
+        // additive lighting. Per later feedback that landed too strong —
+        // dialed back hard from that clearly-visible baseline down to a
+        // much subtler one: the groove is now a much narrower carved seam
+        // (off shrunk from 10 to 4, so the two rim strokes hug close to the
+        // center instead of reading as a wide gouge) with real transparency
+        // in every stroke instead of flat opaque fills, and the highlight
+        // rim in particular — the main source of contrast against dark rock
+        // — pulled down in both brightness and alpha so it reads as a faint
+        // glint rather than a bright edge. Still present and still the same
+        // dark, desaturated warm-gray tone, just far quieter.
+        const off = 4;
 
-        // Wide, now fully opaque dark halo underneath, then a near-black
-        // groove core on top of it — the base carved void. Halo alpha taken
-        // to 1.0 (was 0.92) — genuinely opaque black underneath, not just
-        // close to it, so there's no rock color left for the scene's
-        // additive lighting to wash out in the first place.
-        ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 38;
+        // Wide dark halo underneath, then a narrower core on top — both now
+        // semi-transparent (was fully opaque #000000) so the plate shading
+        // underneath shows through instead of being fully blotted out.
+        ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+        ctx.lineWidth = 20;
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
 
-        ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 15;
+        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+        ctx.lineWidth = 9;
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
 
-        // shadow side — drawn ON TOP of the halo/core (not under it) so it
-        // actually reads as a dark rim cut into the rock instead of being
-        // buried under the wider fill beneath it. Fully opaque black.
-        ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 10;
+        // shadow side — drawn ON TOP of the halo/core, now also
+        // semi-transparent rather than fully opaque black.
+        ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+        ctx.lineWidth = 5;
         ctx.beginPath();
         ctx.moveTo(p0.x - nx*off, p0.y - ny*off);
         ctx.lineTo(p1.x - nx*off, p1.y - ny*off);
         ctx.stroke();
 
         // far wall — a dark, rock-toned rim on the side facing
-        // CRACK_LIGHT_DIR, also on top. Pushed further again (was
-        // rgba(85,75,68,0.9)) — deliberately erring toward too strong per
-        // instruction, to land clearly visible on even a brightly-lit,
-        // river-adjacent boulder rather than staying marginal. Still a
-        // dark, desaturated warm gray — nowhere near white or a saturated
-        // color, just a bolder version of the same rock-toned highlight.
-        ctx.strokeStyle = 'rgba(112,99,89,0.95)';
-        ctx.lineWidth = 10;
+        // CRACK_LIGHT_DIR, also on top. Dimmed and made much more
+        // transparent (was rgba(112,99,89,0.95)) — still the same
+        // dark, desaturated warm gray, nowhere near white or a saturated
+        // color, just far fainter so it barely stands out from the rock.
+        ctx.strokeStyle = 'rgba(88,78,70,0.28)';
+        ctx.lineWidth = 5;
         ctx.beginPath();
         ctx.moveTo(p0.x + nx*off, p0.y + ny*off);
         ctx.lineTo(p1.x + nx*off, p1.y + ny*off);
