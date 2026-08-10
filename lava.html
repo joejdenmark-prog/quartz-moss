@@ -323,6 +323,18 @@ const lavaMaterial = new THREE.ShaderMaterial({
       // being asked for — while still avoiding true (0,0,0).
       col = max(col, vec3(0.015, 0.003, 0.0015));
 
+      // Heat haze/shimmer — a purely additive final layer on top of
+      // everything above: sampled from its own independent, faster-moving
+      // UV offset (never fed back into flowUv/warp/n1/n2/crustN/veins/
+      // bumpUv, so the base flow's own pattern and speed are completely
+      // unaffected by it), reusing the fbm2 already defined above rather
+      // than adding new noise machinery. A small multiplicative brightness
+      // ripple (~±4%) is enough to read as atmospheric shimmer without
+      // looking like a second flow pattern layered on the first.
+      vec2 hazeUv = vUv*vec2(30.0,36.0) + vec2(uTime*0.60, uTime*0.46);
+      float haze = fbm2(hazeUv) - 0.5;
+      col *= 1.0 + haze*0.08;
+
       gl_FragColor = vec4(col, 1.0);
     }
   `,
@@ -1827,6 +1839,126 @@ function updateSmoke(dt){
   }
 }
 
+// ── Continuous ambient steam ─────────────────────────────────────────────────
+// A new, additional wisp layer — distinct from both the ambient drift-smoke
+// above (smokeTex, faint reddish tint) and the bubble-pop smoke (popSmokeTex,
+// dark near-black, only spawned on a pop). This one is pale steam/vapor-
+// toned, spawns continuously and much more frequently across the whole
+// river regardless of bubble activity, and stays far lower-opacity than
+// either existing system so it reads as a constant faint haze rather than
+// a visible cloud. Own texture/pool/timer — doesn't touch smokeTex/
+// smokePool or either existing spawn function at all.
+const steamTex = makeRadialTexture('rgba(225,228,230,0.30)', 'rgba(214,217,219,0)');
+const steamPool = makeSpritePool(18, steamTex, THREE.NormalBlending);
+let steamTimer = 0.4;
+function updateSteamSpawning(dt){
+  steamTimer -= dt;
+  if (steamTimer <= 0) {
+    steamTimer = 0.35 + range(0, 0.35); // much more frequent than ambient smoke's 0.6-1.6s, for whole-river coverage
+    spawnSteam();
+  }
+}
+function spawnSteam(){
+  const item = steamPool.find(p => !p.active);
+  if (!item) return;
+  const z = range(-ORTHO_H*0.9, ORTHO_H*0.9);
+  const x = centerX(z) + range(-0.85, 0.85) * halfWidth(z);
+  item.active = true;
+  item.data = {
+    x, z, driftX: range(-0.03,0.03), driftZ: range(0.01,0.05),
+    life: 0, maxLife: range(4.5,7.0), startSize: range(0.5,0.8), endSize: range(1.6,2.3),
+    // Peak alpha capped far below both ambient smoke's 0.28 and pop-smoke's
+    // 0.30-0.55 — this is meant to be barely-there atmospheric haze.
+    peakAlpha: range(0.045, 0.10),
+  };
+  item.sprite.visible = true;
+  item.sprite.position.set(x, 1.25, z);
+  item.sprite.material.opacity = 0;
+  item.sprite.scale.set(item.data.startSize*0.6, item.data.startSize*1.4, 1);
+}
+function updateSteam(dt){
+  for (const item of steamPool) {
+    if (!item.active) continue;
+    const d = item.data;
+    d.life += dt;
+    const tt = d.life / d.maxLife;
+    if (tt >= 1) { item.active = false; item.sprite.visible = false; continue; }
+    d.x += d.driftX*dt; d.z += d.driftZ*dt;
+    const scale = d.startSize + (d.endSize - d.startSize) * tt;
+    item.sprite.position.set(d.x, 1.25 + tt*1.8, d.z);
+    item.sprite.scale.set(scale*0.6, scale*1.4, 1);
+    let alpha;
+    if (tt < 0.2) alpha = tt/0.2 * d.peakAlpha;
+    else alpha = d.peakAlpha * (1 - (tt-0.2)/0.8);
+    item.sprite.material.opacity = Math.max(0, alpha);
+  }
+}
+
+// ── Occasional floating embers ───────────────────────────────────────────────
+// Small warm glowing motes, independent of the bubble-pop burst system —
+// infrequent (a handful of seconds apart, not a constant stream), own
+// pool/texture/timer, no interaction with burstPool at all. Color pulled
+// directly from this scene's own lava shader constants above (hottestCore/
+// brightHot) rather than a fresh palette, so embers read as literally the
+// same molten-rock color as the river itself.
+//
+// This camera is a straight-down ORTHOGRAPHIC view, so true vertical
+// (world-Y) motion is invisible on screen — confirmed and worked around the
+// same way for the eruption-burst particles elsewhere in this file. Rather
+// than move an ember in an invisible direction, the "rising" sensation here
+// is conveyed through what orthographic top-down CAN show: a horizontal
+// wobble/drift (the requested side-to-side wander) plus a gentle shrink and
+// fade over its life, reading as an ember cooling and dissipating as it
+// drifts up and out of view.
+const emberTex = makeRadialTexture('rgba(255,204,71,0.95)', 'rgba(255,117,15,0)');
+const emberPool = makeSpritePool(10, emberTex, THREE.AdditiveBlending);
+// Same ACES-tone-mapping fix applied to the eruption-burst particles
+// earlier in this file — additively-blended warm colors get washed toward
+// white by this scene's tone mapping otherwise (confirmed via pixel
+// readback when that was diagnosed), so this pool is exempted the same way.
+for (const item of emberPool) item.sprite.material.toneMapped = false;
+let emberTimer = 2.5;
+function updateEmberSpawning(dt){
+  emberTimer -= dt;
+  if (emberTimer <= 0) {
+    emberTimer = 2.5 + range(0, 3.5); // infrequent — roughly one every 2.5-6s
+    spawnEmber();
+  }
+}
+function spawnEmber(){
+  const item = emberPool.find(p => !p.active);
+  if (!item) return;
+  const z = range(-ORTHO_H*0.85, ORTHO_H*0.85);
+  const x = centerX(z) + range(-0.75, 0.75) * halfWidth(z);
+  item.active = true;
+  item.data = {
+    baseX: x, x, z,
+    wobbleAmp: range(0.06, 0.16), wobbleFreq: range(1.2, 2.4), wobblePhase: range(0, Math.PI*2),
+    life: 0, maxLife: range(2.2, 3.6),
+    size: range(0.05, 0.09),
+  };
+  item.sprite.visible = true;
+  item.sprite.position.set(x, 1.6, z);
+  item.sprite.material.opacity = 0;
+  item.sprite.scale.setScalar(item.data.size);
+}
+function updateEmbers(dt){
+  for (const item of emberPool) {
+    if (!item.active) continue;
+    const d = item.data;
+    d.life += dt;
+    const tt = d.life / d.maxLife;
+    if (tt >= 1) { item.active = false; item.sprite.visible = false; continue; }
+    d.x = d.baseX + Math.sin(d.life*d.wobbleFreq + d.wobblePhase) * d.wobbleAmp;
+    item.sprite.position.set(d.x, 1.6, d.z);
+    item.sprite.scale.setScalar(d.size * (1.0 - tt*0.35));
+    let alpha;
+    if (tt < 0.15) alpha = tt/0.15;
+    else alpha = 1.0 - (tt-0.15)/0.85;
+    item.sprite.material.opacity = Math.max(0, alpha) * 0.85;
+  }
+}
+
 // ── Drag-on-lava parting effect ──────────────────────────────────────────────
 const dragSlots = Array.from({length: MAX_TOUCH}, () => ({ x: 9999, z: 9999, strength: 0, active: false, pointerId: null }));
 
@@ -2288,6 +2420,10 @@ renderer.setAnimationLoop(() => {
   if (activeBubbleCount < 4) trySpawnBubble();
   updateSmokeSpawning(dt);
   updateSmoke(dt);
+  updateSteamSpawning(dt);
+  updateSteam(dt);
+  updateEmberSpawning(dt);
+  updateEmbers(dt);
   updateSplashes(dt);
   updateBurst(dt);
 
