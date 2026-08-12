@@ -331,9 +331,15 @@ const lavaMaterial = new THREE.ShaderMaterial({
       // than adding new noise machinery. A small multiplicative brightness
       // ripple (~±4%) is enough to read as atmospheric shimmer without
       // looking like a second flow pattern layered on the first.
+      // Weighted by the existing heat field (reusing the same threshold
+      // window the brightHot color mix above already uses) so the shimmer
+      // concentrates over the hottest/brightest channels and fades to
+      // ~nothing over cooler crust — real heat haze rises off the hottest
+      // surface, not evenly off everything.
       vec2 hazeUv = vUv*vec2(30.0,36.0) + vec2(uTime*0.60, uTime*0.46);
       float haze = fbm2(hazeUv) - 0.5;
-      col *= 1.0 + haze*0.08;
+      float hazeWeight = smoothstep(0.45, 0.80, heat);
+      col *= 1.0 + haze*0.08*hazeWeight;
 
       gl_FragColor = vec4(col, 1.0);
     }
@@ -1936,6 +1942,11 @@ function spawnEmber(){
     wobbleAmp: range(0.06, 0.16), wobbleFreq: range(1.2, 2.4), wobblePhase: range(0, Math.PI*2),
     life: 0, maxLife: range(2.2, 3.6),
     size: range(0.05, 0.09),
+    // Two decorrelated frequencies (rather than one) so the flicker reads
+    // as an irregular glow-pulse instead of a smooth, obviously-periodic
+    // pulse; own phases per-ember so multiple embers don't flicker in sync.
+    flickerFreq1: range(12, 20), flickerPhase1: range(0, Math.PI*2),
+    flickerFreq2: range(22, 34), flickerPhase2: range(0, Math.PI*2),
   };
   item.sprite.visible = true;
   item.sprite.position.set(x, 1.6, z);
@@ -1951,11 +1962,20 @@ function updateEmbers(dt){
     if (tt >= 1) { item.active = false; item.sprite.visible = false; continue; }
     d.x = d.baseX + Math.sin(d.life*d.wobbleFreq + d.wobblePhase) * d.wobbleAmp;
     item.sprite.position.set(d.x, 1.6, d.z);
+    // Slight flicker/glow — a fast, small brightness wobble layered on top
+    // of the fade envelope below, distinct from (and much quicker than)
+    // the slow positional wobble above. Two sine terms at different,
+    // per-ember-randomized frequencies avoid an obviously-periodic pulse;
+    // clamped to a modest range so it reads as "slight" per the brief.
+    const flicker = 0.85
+      + 0.12*Math.sin(d.life*d.flickerFreq1 + d.flickerPhase1)
+      + 0.06*Math.sin(d.life*d.flickerFreq2 + d.flickerPhase2);
+    const flickerClamped = Math.max(0.65, Math.min(1.1, flicker));
     item.sprite.scale.setScalar(d.size * (1.0 - tt*0.35));
     let alpha;
     if (tt < 0.15) alpha = tt/0.15;
     else alpha = 1.0 - (tt-0.15)/0.85;
-    item.sprite.material.opacity = Math.max(0, alpha) * 0.85;
+    item.sprite.material.opacity = Math.max(0, alpha) * 0.85 * flickerClamped;
   }
 }
 
