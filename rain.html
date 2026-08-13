@@ -1,0 +1,974 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#03040a">
+<title>Rain on Window</title>
+<style>
+  *,*::before,*::after{ margin:0; padding:0; box-sizing:border-box; }
+  html,body{
+    width:100%; height:100%; overflow:hidden;
+    background:#03040a;
+    font-family:system-ui,-apple-system,sans-serif;
+    -webkit-tap-highlight-color:transparent;
+  }
+  #canvas{
+    display:block; width:100%; height:100%;
+    touch-action:none; -webkit-tap-highlight-color:transparent; user-select:none;
+  }
+  #vignette{
+    position:fixed; inset:0; pointer-events:none; z-index:5;
+    background:radial-gradient(ellipse 100% 90% at 50% 45%,
+      transparent 40%, rgba(0,0,2,0.40) 78%, rgba(0,0,2,0.78) 100%);
+  }
+  #fps{
+    position:fixed; top:8px; left:8px; z-index:9999;
+    font:12px/1.4 monospace; color:#8fb4e0;
+    background:rgba(4,6,12,0.55); padding:4px 8px; border-radius:4px;
+    pointer-events:none; white-space:pre;
+  }
+  /* TEMPORARY DEBUG — remove along with the JS block marked
+     "TEMPORARY DEBUG OVERLAY" and the #debugOverlay div below. */
+  #debugOverlay{
+    position:fixed; top:40px; left:8px; z-index:9999;
+    font:11px/1.4 monospace; color:#9fe0a8;
+    background:rgba(4,6,12,0.55); padding:4px 8px; border-radius:4px;
+    pointer-events:none; white-space:pre-wrap; max-width:calc(100vw - 24px);
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="vignette"></div>
+<div id="fps">-- fps</div>
+<!-- TEMPORARY DEBUG — remove along with the JS block marked
+     "TEMPORARY DEBUG OVERLAY" and the #debugOverlay CSS rule above. -->
+<div id="debugOverlay"></div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── Seeded RNG ───────────────────────────────────────────────────────────────
+// Same mulberry32 helper as the other scenes in this set — deterministic
+// across reloads, which makes the bokeh layout reproducible while tuning.
+function mulberry32(seed){
+  return function(){
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rng   = mulberry32(0x52a1e9);
+const range = (a,b) => a + rng() * (b - a);
+
+// ── Renderer / scene / camera ────────────────────────────────────────────────
+// visualViewport (not window.innerWidth/Height) avoids the iOS Safari
+// address-bar-collapse mismatch — same reasoning as the other scenes.
+function getViewportSize(){
+  if (window.visualViewport) {
+    return { w: window.visualViewport.width, h: window.visualViewport.height };
+  }
+  return { w: window.innerWidth, h: window.innerHeight };
+}
+
+let { w: W, h: H } = getViewportSize();
+const canvas = document.getElementById('canvas');
+const isMobile = window.matchMedia('(pointer: coarse)').matches;
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(isMobile ? Math.min(window.devicePixelRatio, 1.5) : Math.min(window.devicePixelRatio, 2));
+canvas.style.width = W + 'px';
+canvas.style.height = H + 'px';
+renderer.setSize(W, H);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+// No tone mapping here, deliberately — unlike the lava scene, everything
+// visible in this one is a single custom fragment shader (not a lit PBR
+// material), so brightness is authored directly in-shader. Tone mapping
+// on top of that just adds a layer of indirection between the numbers in
+// the shader and what actually shows up on screen, for no benefit here.
+renderer.toneMapping = THREE.NoToneMapping;
+
+const mainScene = new THREE.Scene();
+
+// Perspective, not orthographic — this is a window being looked through,
+// not a top-down diorama, so a real vanishing-point camera is what actually
+// sells "looking out" rather than "looking down at a flat texture."
+const camera = new THREE.PerspectiveCamera(50, W / H, 0.1, 100);
+camera.position.set(0, 0, 5);
+camera.lookAt(0, 0, 0);
+
+let resizeTimer;
+function handleViewportResize(){
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    const size = getViewportSize();
+    W = size.w; H = size.h;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    camera.aspect = W / H;
+    camera.updateProjectionMatrix();
+    renderer.setSize(W, H);
+    updateGlassPlaneSize();
+    glassMat.uniforms.uCellSize.value = computeDropletCell(H);
+    updateBokehRT();
+    resizeOccupancyRT();
+  }, 250);
+}
+window.addEventListener('resize', handleViewportResize);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', handleViewportResize);
+}
+
+// ── Responsive sizing helpers ────────────────────────────────────────────────
+// Droplet density and bokeh render-target resolution are both derived from
+// the actual viewport height rather than a fixed constant, so the scene
+// holds up across iPhone's tall/narrow aspect and iPad's wider one (and
+// across rotation), instead of assuming one screen size.
+function clamp(v, lo, hi){ return Math.min(hi, Math.max(lo, v)); }
+
+// Droplet grid cell size, in normalized glass-space units — glass-space y
+// always spans exactly 0..1 across the full viewport height regardless of
+// device (see frustumSizeAtZ/updateGlassPlaneSize below), so a fixed cell
+// size there means a droplet occupies the same *fraction* of screen height
+// on every device — physically huge (and sparse-looking) on a big iPad,
+// cramped on a small phone. Anchoring to a reference height instead keeps
+// on-screen droplet size roughly consistent: taller/larger screens get
+// proportionally more rows rather than the same 10 rows stretched bigger.
+const DROPLET_ROWS_AT_REF_HEIGHT = 10;
+const DROPLET_REF_HEIGHT = 850;
+function computeDropletCell(viewportH){
+  const cell = (DROPLET_REF_HEIGHT / DROPLET_ROWS_AT_REF_HEIGHT) / viewportH;
+  return clamp(cell, 0.05, 0.16);
+}
+
+// Bokeh render-target resolution: aspect stays fixed at the original 320:420
+// ratio (so the cover-crop framing against the glass plane is unchanged —
+// same look), but magnitude scales with viewport height so a big iPad
+// screen isn't sampling the same tiny fixed texture a phone does.
+const BOKEH_RT_ASPECT_FIXED = 320 / 420;
+function computeBokehRTSize(viewportH){
+  const targetH = Math.round(clamp(viewportH * 0.5, 260, 640));
+  const targetW = Math.round(targetH * BOKEH_RT_ASPECT_FIXED);
+  return { w: targetW, h: targetH };
+}
+
+// ── Step 1: blurred background layer, rendered to an offscreen target ───────
+// A handful of soft warm bokeh blobs standing in for out-of-focus streetlights
+// at night, baked once into a small render target rather than built from real
+// geometry or external images — cheap, and exactly what a real out-of-focus
+// background actually looks like (soft circles of light, nothing sharp).
+//
+// Deliberately low-res (well under screen resolution — see
+// computeBokehRTSize) since the content is inherently soft-edged; sampling a
+// small texture up through a bilinear filter *is* the blur here, so there's
+// no separate blur pass to pay for. Re-rendered on resize/rotation (see
+// updateBokehRT), but not every frame — nothing in this first pass animates
+// the background, so re-rendering it per frame would be pure waste.
+const bokehRT0 = computeBokehRTSize(H);
+const bokehRT = new THREE.WebGLRenderTarget(bokehRT0.w, bokehRT0.h, {
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat,
+  depthBuffer: false,
+  stencilBuffer: false,
+});
+const BOKEH_RT_ASPECT = BOKEH_RT_ASPECT_FIXED;
+
+const bokehScene = new THREE.Scene();
+const bokehCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+// Small fixed set of light sources — "a few" per the brief, not a dense
+// field — each with its own position, size, softness and warm color, and a
+// depth field (0 = far/small/dim, 1 = near/large/bright) to fake a simple
+// depth-of-field spread rather than every light reading as the same distance.
+const NUM_BOKEH = 11;
+const bokehPos = [], bokehRadius = [], bokehSoft = [], bokehColor = [];
+for (let i = 0; i < NUM_BOKEH; i++) {
+  const depth = range(0, 1);
+  const r = 0.022 + depth * 0.062 + range(-0.008, 0.008);
+  bokehPos.push(new THREE.Vector2(range(0.06, 0.94), range(0.10, 0.88)));
+  bokehRadius.push(r);
+  bokehSoft.push(r * (0.55 + range(0, 0.25)));
+  // Warm streetlight range: mostly sodium-amber, a few cooler/paler ones
+  // mixed in so it doesn't read as one uniform color repeated.
+  const warmth = range(0, 1);
+  const brightness = 0.30 + depth * 0.55;
+  bokehColor.push(new THREE.Vector3(
+    brightness * 1.0,
+    brightness * (0.55 + warmth * 0.28),
+    brightness * (0.16 + warmth * 0.30)
+  ));
+}
+
+const bokehMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uPos:    { value: bokehPos },
+    uRadius: { value: bokehRadius },
+    uSoft:   { value: bokehSoft },
+    uColor:  { value: bokehColor },
+    uAspect: { value: BOKEH_RT_ASPECT },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: `
+    precision mediump float;
+    varying vec2 vUv;
+    uniform vec2  uPos[${NUM_BOKEH}];
+    uniform float uRadius[${NUM_BOKEH}];
+    uniform float uSoft[${NUM_BOKEH}];
+    uniform vec3  uColor[${NUM_BOKEH}];
+    uniform float uAspect;
+
+    void main(){
+      // aspect-correct so every blob is a circle in actual pixels, not an
+      // ellipse stretched by the render target's own width:height ratio.
+      vec2 p = vec2(vUv.x * uAspect, vUv.y);
+
+      // dark night sky, very slightly warmer/lighter toward the bottom —
+      // a hint of street-level ambient glow rather than a flat black void.
+      vec3 col = mix(vec3(0.012,0.015,0.026), vec3(0.03,0.028,0.032), vUv.y);
+
+      for (int i = 0; i < ${NUM_BOKEH}; i++){
+        vec2 bp = vec2(uPos[i].x * uAspect, uPos[i].y);
+        float d = length(p - bp);
+        float r = uRadius[i];
+        float soft = max(uSoft[i], 0.001);
+        float glow = 1.0 - smoothstep(r - soft, r + soft, d);
+        float core = 1.0 - smoothstep(0.0, r * 0.4, d);
+        col += uColor[i] * (glow*0.85 + core*0.6);
+      }
+
+      // gentle vignette so the bokeh field itself has some depth instead of
+      // reading as flat all the way to its own edges
+      float vig = 1.0 - smoothstep(0.55, 1.05, length(vUv - 0.5));
+      col *= mix(0.7, 1.0, vig);
+
+      // Soft highlight rolloff (a cheap Reinhard curve) instead of a hard
+      // clip — overlapping blobs graded into flat white here, since we're
+      // not using the renderer's own tone mapping (deliberately off, see
+      // the JS setup above) and additive light with no rolloff at all just
+      // blows out to a solid pale wash wherever two or more circles meet.
+      col = col / (1.0 + col);
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+});
+bokehScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bokehMat));
+
+// Re-renders the (still fully static) bokeh layer at a resolution matching
+// the current viewport height — called once at startup and again on every
+// resize/rotation, since computeBokehRTSize depends on H.
+function updateBokehRT(){
+  const { w: bw, h: bh } = computeBokehRTSize(H);
+  bokehRT.setSize(bw, bh);
+  renderer.setRenderTarget(bokehRT);
+  renderer.render(bokehScene, bokehCamera);
+  renderer.setRenderTarget(null);
+}
+updateBokehRT();
+
+// ── Shared droplet-lifecycle GLSL ────────────────────────────────────────────
+// hash1/hash2 and the unified grow→release→fall→respawn cell math, shared
+// verbatim between the occupancy pre-pass below (which searches for falling
+// cells at low resolution) and the glass shader (which searches at pixel
+// resolution over the much smaller candidate set the pre-pass narrows it
+// down to) — one copy, so the two can never drift out of sync.
+const SHARED_CELL_GLSL = `
+    float hash1(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453123); }
+    vec2 hash2(vec2 p){
+      vec2 q = vec2(dot(p,vec2(127.1,311.7)), dot(p,vec2(269.5,183.3)));
+      return fract(sin(q)*43758.5453123);
+    }
+
+    struct CellState {
+      bool present;
+      bool falling;
+      vec2 pos;
+      float radius;
+      float homeX, homeY;
+      float releaseR;
+      float accel;
+      float wobbleAmp, wobbleFreq, wobblePhase;
+      float tFall;
+    };
+
+    // A released droplet's radius grows slowly as it falls — a cheap stand-in
+    // for "picking up smaller droplets along the way" without needing to
+    // track which specific ones it touched.
+    float radiusAtFallTime(float releaseR, float accel, float t){
+      return min(releaseR + 0.10 * (0.5*accel*t*t), releaseR*1.6);
+    }
+
+    CellState cellState(vec2 cell, float cellSize, float uTimeIn){
+      CellState cs;
+      cs.present = false; cs.falling = false; cs.tFall = 0.0;
+
+      // Same presence gate, same jitter, same size distribution as the
+      // original static grid — a cell's identity (whether it holds a
+      // droplet at all, its home position, its full-grown size) is exactly
+      // what it always was. Only its position-over-time is new.
+      float presence = hash1(cell);
+      if (presence > 0.5) return cs; // ~50% of cells actually hold a droplet
+
+      vec2 jitter = hash2(cell + 17.0) - 0.5;
+      vec2 centerP = (cell + 0.5 + jitter*0.85) * cellSize;
+      float sizeHash = pow(hash1(cell + 91.3), 2.6);
+      float releaseR = mix(0.020, 0.095, sizeHash);
+
+      float exitY = -0.12; // a bit below the bottom edge
+      float fallDist = max(centerP.y - exitY, 0.05); // each row falls its own distance to exit
+      float accel = mix(0.05, 0.085, hash1(cell + 71.0));
+      float growDur = mix(7.0, 15.0, hash1(cell + 11.0));   // slow: "sit and grow"
+      float fallDur = sqrt(2.0 * fallDist / accel);          // derived, so it lands exactly on exitY
+      float cycleDur = growDur + fallDur;
+      float phaseOffset = hash1(cell + 5.0) * 97.0;          // desyncs cells from each other
+
+      float cycleT = mod(uTimeIn + phaseOffset, cycleDur);
+
+      cs.present = true;
+      cs.homeX = centerP.x; cs.homeY = centerP.y; cs.releaseR = releaseR; cs.accel = accel;
+      cs.wobbleAmp = 0.0; cs.wobbleFreq = 0.0; cs.wobblePhase = 0.0;
+
+      if (cycleT < growDur) {
+        // Sit and grow: stationary at its home cell, size ramping up from a
+        // small seed rather than popping in at full size. Wobble is never
+        // used while growing, so those hashes are skipped entirely here.
+        float growT = cycleT / growDur;
+        cs.falling = false;
+        cs.radius = releaseR * mix(0.12, 1.0, smoothstep(0.0, 1.0, growT));
+        cs.pos = centerP;
+      } else {
+        // Released: sliding down under acceleration, from its own home
+        // position, with side-to-side wobble instead of a straight line.
+        // Wobble phase re-rolls each cycle (cheap variety) without touching
+        // growDur/accel/releaseR, which must stay cell-constant for the
+        // closed-form fall math to stay self-consistent cycle to cycle.
+        float cycleIndex = floor((uTimeIn + phaseOffset) / cycleDur);
+        float wobblePhase = hash1(cell + cycleIndex*131.7 + 2.0) * 6.2831853;
+        float wobbleAmp = mix(0.004, 0.014, hash1(cell + 83.0));
+        // Radians per second directly (not cycles-per-second) — roughly 1-2
+        // gentle side-to-side drifts over a typical fall, not a rapid zigzag.
+        float wobbleFreq = mix(0.9, 1.8, hash1(cell + 97.0));
+
+        float tFall = cycleT - growDur;
+        float fallenDist = 0.5 * accel * tFall * tFall;
+        cs.falling = true;
+        cs.tFall = tFall;
+        cs.wobbleAmp = wobbleAmp; cs.wobbleFreq = wobbleFreq; cs.wobblePhase = wobblePhase;
+        cs.pos = vec2(centerP.x + wobbleAmp * sin(wobbleFreq*tFall + wobblePhase), centerP.y - fallenDist);
+        cs.radius = radiusAtFallTime(releaseR, accel, tFall);
+      }
+      return cs;
+    }
+`;
+
+// ── Falling-droplet occupancy pre-pass ───────────────────────────────────────
+// The glass shader's falling-droplet search (checking every row above a
+// pixel, in its column ±1 — up to ~60 candidates on a big screen) is
+// correct but measured too expensive at iPad-scale resolutions: the search
+// itself, not what's done with each result, is what dominates. This moves
+// that search out of the per-pixel main render and into a tiny pass that
+// runs once a frame at one texel per GRID CELL (not per screen pixel):
+// for each cell's own position, it finds the nearest falling droplet body
+// and the nearest falling trail (tracked separately, so a thin trail isn't
+// starved out by a nearer droplet body when only one winner is kept), and
+// writes their cell *identities* — not their appearance — into a texture.
+// The glass shader then samples a small neighborhood of this texture and,
+// for whatever cell identities it finds, calls the exact same closed-form
+// cellState() used everywhere else. Precision is never lost — only which
+// candidates are worth evaluating is precomputed at lower resolution.
+//
+// NearestFilter is required (unlike the bokeh pass's Linear): these texels
+// encode integer cell coordinates as bytes, and blending two different
+// cells' coordinates together would decode to a nonsense cell that doesn't
+// exist — this must snap, not blend.
+function computeOccupancyGridSize(cellSize, planeAspect){
+  const cols = Math.ceil(planeAspect / cellSize) + 3;
+  // Rows must cover every cell the main shader's falling-droplet search can
+  // actually reach, not just the visible grid: a pixel near the TOP of the
+  // screen searches up to maxDy rows above itself (same maxDy as the main
+  // shader — roughly one full screen height of rows), so the worst-case
+  // cell index it can query is roughly DOUBLE the visible row count —
+  // cells whose home position is above the visible top edge, falling into
+  // view. Sizing this too small silently clamps those lookups to the
+  // wrong edge texel; verified by diffing against the exhaustive
+  // per-pixel search, which caught exactly this (~5-9% of pixels wrong)
+  // before this fix.
+  const visibleRows = Math.ceil(1.0 / cellSize);
+  const rows = visibleRows * 2 + 3;
+  return { cols, rows };
+}
+
+const occGrid0 = computeOccupancyGridSize(computeDropletCell(H), camera.aspect);
+const occRT = new THREE.WebGLRenderTarget(occGrid0.cols, occGrid0.rows, {
+  minFilter: THREE.NearestFilter,
+  magFilter: THREE.NearestFilter,
+  format: THREE.RGBAFormat,
+  depthBuffer: false,
+  stencilBuffer: false,
+});
+
+const occScene = new THREE.Scene();
+const occCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+const occMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uCellSize:   { value: computeDropletCell(H) },
+    uTime:       { value: 0 },
+    uOccGridDim: { value: new THREE.Vector2(occGrid0.cols, occGrid0.rows) },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: `
+    precision mediump float;
+    varying vec2 vUv;
+    uniform float uCellSize;
+    uniform float uTime;
+    uniform vec2 uOccGridDim;
+
+    ${SHARED_CELL_GLSL}
+
+    void main(){
+      // This texel represents exactly one grid cell — the same cell the
+      // main shader would land on if it computed cellBase for a pixel here.
+      // No neighbor search: just this cell's own falling flag. (An earlier
+      // version of this pass searched neighbors and picked a single
+      // "winning" candidate per texel to hand to the main shader — that
+      // was lossy: a pixel querying from a slightly different sub-cell
+      // position than the texel's own center could need a candidate that
+      // wasn't anyone's single winner, and it would silently go missing.
+      // Verified by diffing against the exhaustive per-pixel search: ~5%
+      // of pixels differed, some by the full brightness of a droplet —
+      // exactly the kind of gap that reads as popping as it flickers frame
+      // to frame. This flag-only version can't lose anything: the main
+      // shader still visits every real candidate cell itself, this just
+      // lets it skip the expensive cellState() math for the ones that
+      // aren't falling — cheaply, ahead of time.)
+      vec2 cell = floor(vUv * uOccGridDim) - vec2(1.0);
+      CellState cs = cellState(cell, uCellSize, uTime);
+      float falling = (cs.present && cs.falling) ? 1.0 : 0.0;
+      gl_FragColor = vec4(falling, 0.0, 0.0, 1.0);
+    }
+  `,
+});
+occScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), occMat));
+
+// Resizes the occupancy target to match the current grid dimensions —
+// called on init and on resize, same trigger as the bokeh target.
+function resizeOccupancyRT(){
+  const { cols, rows } = computeOccupancyGridSize(glassMat.uniforms.uCellSize.value, camera.aspect);
+  occRT.setSize(cols, rows);
+  occMat.uniforms.uOccGridDim.value.set(cols, rows);
+  glassMat.uniforms.uOccGridDim.value.set(cols, rows);
+}
+
+// Re-renders the occupancy pass — unlike the bokeh pass, this must run
+// every frame (droplets move), not just on resize.
+function updateOccupancyRT(uTimeNow){
+  occMat.uniforms.uCellSize.value = glassMat.uniforms.uCellSize.value;
+  occMat.uniforms.uTime.value = uTimeNow;
+  renderer.setRenderTarget(occRT);
+  renderer.render(occScene, occCamera);
+  renderer.setRenderTarget(null);
+}
+
+// ── Step 2: refractive rain droplets on the glass plane ──────────────────────
+// The glass is a single plane sized to exactly fill the camera frustum at
+// GLASS_Z, so its own UV space already matches the screen 1:1 — no separate
+// full-screen quad/orthographic pass needed for this part.
+const GLASS_Z = 0;
+
+function frustumSizeAtZ(cam, worldZ){
+  const dist = Math.abs(cam.position.z - worldZ);
+  const vFov = cam.fov * Math.PI / 180;
+  const height = 2 * Math.tan(vFov / 2) * dist;
+  const width = height * cam.aspect;
+  return { width, height };
+}
+
+const glassGeo = new THREE.PlaneGeometry(1, 1);
+const glassMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uBgTex:      { value: bokehRT.texture },
+    uBgAspect:   { value: BOKEH_RT_ASPECT },
+    uPlaneAspect:{ value: 1 },
+    uCellSize:   { value: computeDropletCell(H) },
+    uTime:       { value: 0 },
+    uOccTex:     { value: occRT.texture },
+    uOccGridDim: { value: new THREE.Vector2(occGrid0.cols, occGrid0.rows) },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    precision mediump float;
+    varying vec2 vUv;
+    uniform sampler2D uBgTex;
+    uniform float uBgAspect;
+    uniform float uPlaneAspect;
+    uniform float uCellSize;
+    uniform float uTime;
+    uniform sampler2D uOccTex;
+    uniform vec2 uOccGridDim;
+
+    ${SHARED_CELL_GLSL}
+
+    // "background-size:cover"-style remap so the bokeh render target's own
+    // aspect ratio never stretches/squashes the circles it contains when
+    // it's sampled onto a differently-proportioned glass plane.
+    vec2 coverUv(vec2 uv, float dstAspect, float srcAspect){
+      vec2 scale = dstAspect > srcAspect ? vec2(1.0, srcAspect/dstAspect) : vec2(dstAspect/srcAspect, 1.0);
+      return (uv - 0.5) * scale + 0.5;
+    }
+
+    // ── Shared droplet shading ──────────────────────────────────────────────
+    // The exact refraction/shape/shading math from the original static-only
+    // shader, unchanged, factored into one function so every droplet — the
+    // permanent ambient field, a sitting-and-growing droplet, or the head of
+    // a falling one — renders identically. Only WHERE this gets called from
+    // (a fixed grid cell vs. a moving simulated position) differs.
+    struct Droplet {
+      bool hit;
+      float w;
+      vec2 uv;
+      vec3 rim;
+      vec3 ambient;
+      float dark;
+    };
+
+    Droplet shadeDroplet(vec2 p, vec2 vUvIn, vec2 centerP, float radiusP, vec2 lightDir, float planeAspect){
+      Droplet d;
+      d.hit = false; d.w = 0.0; d.uv = vec2(0.0); d.rim = vec3(0.0); d.ambient = vec3(0.0); d.dark = 0.0;
+      if (radiusP <= 0.0005) return d;
+
+      // Larger droplets stretch into a teardrop/oval rather than staying
+      // perfectly round — gravity pulling on a bigger droplet clinging to
+      // glass elongates it; small ones stay closer to circular. Anisotropic
+      // (and slightly asymmetric) scaling of the local offset before
+      // measuring distance, so the *shape test itself* is oval.
+      float sizeT = smoothstep(0.030, 0.085, radiusP);
+      vec2 dP = p - centerP;
+      vec2 dShaped = dP;
+      dShaped.y /= (1.0 + sizeT*0.55);           // taller than wide
+      dShaped.y -= sizeT * radiusP * 0.16;        // mild top-narrow/bottom-full taper
+
+      float distP = length(dShaped);
+      if (distP >= radiusP) return d;
+
+      float t = clamp(distP / radiusP, 0.0, 1.0);
+      float h = sqrt(max(0.0, 1.0 - t*t));
+      vec2 normalXY = dShaped / radiusP;
+
+      // 1) Zoom/magnification — uniformly strong across the WHOLE droplet,
+      //    including dead center: every point inside samples the
+      //    background from a position pulled part-way toward the droplet's
+      //    own center — literally how a magnifying lens works.
+      vec2 centerUv = vec2(centerP.x / planeAspect, centerP.y);
+      float zoom = mix(0.35, 0.55, hash1(centerP*173.0));
+      vec2 zoomedUv = mix(centerUv, vUvIn, zoom);
+      // 2) Edge bend — bulges outward toward the rim (hemisphere-normal
+      //    falloff), layered on top of the zoom.
+      vec2 edgeBend = normalXY * (1.0 - h) * radiusP * 1.3;
+      d.uv = zoomedUv + vec2(edgeBend.x / planeAspect, edgeBend.y);
+
+      // Tapers smoothly all the way to exactly 0 at t=1 (the droplet's own
+      // rim, matching the hit-test boundary above exactly) — the previous
+      // version floored this at 0.05 to keep the accumUv/totalW divide
+      // stable at an isolated droplet's edge, but that floor meant every
+      // droplet's contribution to the blend *jumps* from 0.05 to 0 right
+      // at its own boundary. Invisible in isolation (it's already at the
+      // silhouette edge, fading into background), but when that boundary
+      // falls *inside* another overlapping droplet's visible area, the
+      // jump shows up as a hard seam cutting across it — confirmed by
+      // color-coding which cell wins at each pixel and finding a sharp
+      // ownership boundary running straight through what should have been
+      // one smooth shape. No floor needed: hit is already gated on
+      // totalW > 0.0001 before any division happens, so a single
+      // contributor's weight reaching exactly 0 is safe as long as
+      // something else keeps totalW above that threshold.
+      d.w = 1.0 - smoothstep(0.7, 1.0, t);
+
+      float rimBase = smoothstep(0.78, 0.97, t);
+      float facing = dot(normalXY / max(t, 1e-4), lightDir);
+      float dirBias = mix(0.10, 1.0, facing * 0.5 + 0.5);
+      d.rim = vec3(1.0, 0.98, 0.94) * rimBase * dirBias;
+
+      float fresnel = 1.0 - h;
+      d.ambient = vec3(0.05, 0.06, 0.08) * mix(0.4, 1.0, fresnel);
+
+      d.dark = (1.0 - t) * 0.06;
+      d.hit = true;
+      return d;
+    }
+
+    const float MERGE_MIN_ABSORBER_R = 0.045;
+
+    // Merge visibility for one specific droplet (targetP/targetRadius are
+    // its own fixed center and radius) — not a shared per-pixel value.
+    // An earlier version evaluated this once per pixel using the pixel's
+    // own position, which meant a single round droplet could straddle the
+    // boundary: pixels on the near side of a passing trail got the fade,
+    // pixels on the far side didn't, cutting the droplet into a fully-
+    // visible half and a fully-faded half — a hard-edged "half-moon"
+    // artifact, confirmed by rendering with merge disabled and diffing.
+    // Evaluating per droplet instead means every pixel of a given droplet
+    // sees the same answer, so it fades (and reforms) as one shape.
+    // Uses the same occupancy-gated search as the main falling-droplet
+    // loop, so it stays cheap even though it now runs per droplet rather
+    // than once per pixel — bounded to actual rendered droplet hits only.
+    float mergeVisibilityAt(vec2 targetP, float targetRadius){
+      float vis = 1.0;
+      vec2 cellBaseT = floor(targetP / uCellSize);
+      int maxDyT = int(ceil(1.0 / uCellSize)) + 1;
+      vec2 occTexelT = vec2(1.0) / uOccGridDim;
+
+      for (int dy = 0; dy <= 22; dy++){
+        if (dy > maxDyT) break;
+        for (int dx = -1; dx <= 1; dx++){
+          vec2 cell = cellBaseT + vec2(float(dx), float(dy));
+          vec2 occUv = (cell + vec2(1.0) + 0.5) * occTexelT;
+          if (texture2D(uOccTex, occUv).r < 0.5) continue;
+
+          CellState cs = cellState(cell, uCellSize, uTime);
+          if (!cs.present || !cs.falling) continue;
+          if (cs.homeY <= targetP.y) continue;
+
+          float t = sqrt(max(0.0, 2.0 * (cs.homeY - targetP.y) / cs.accel));
+          if (t > cs.tFall) continue;
+
+          float xAtT = cs.homeX + cs.wobbleAmp * sin(cs.wobbleFreq*t + cs.wobblePhase);
+          float radiusAtT = radiusAtFallTime(cs.releaseR, cs.accel, t);
+          if (radiusAtT <= MERGE_MIN_ABSORBER_R) continue;
+          if (abs(targetP.x - xAtT) > (targetRadius + radiusAtT*0.7)) continue;
+
+          float recency = cs.tFall - t;
+          vis = min(vis, smoothstep(0.0, 2.0, recency));
+        }
+      }
+      return vis;
+    }
+
+    void main(){
+      // Aspect-corrected "glass space" (p) so droplets are circular
+      // regardless of window aspect ratio, same idea as the bokeh pass.
+      vec2 p = vec2(vUv.x * uPlaneAspect, vUv.y);
+      vec2 lightDir = normalize(vec2(-0.45, 0.62));
+
+      vec2 gp = p / uCellSize;
+      vec2 cellBase = floor(gp);
+
+      float totalW = 0.0;
+      vec2 accumUv = vec2(0.0);
+      vec3 accumRim = vec3(0.0);
+      vec3 accumAmbient = vec3(0.0);
+      float accumDark = 0.0;
+
+      // ── Falling droplets: render + trail, searched in this pixel's own
+      // column (±1) across every row at-or-above it — same exhaustive
+      // search as the original version, for correctness (every real
+      // candidate cell is actually visited; nothing is pre-filtered away
+      // by a lossy lower-resolution pass). What makes it affordable is the
+      // occupancy pre-pass (see updateOccupancyRT / occMat above): one
+      // cheap, nearest-filtered texture fetch per candidate tells us
+      // whether that exact cell is currently falling *before* paying for
+      // the real cellState() (several hash/sin/sqrt calls) — most
+      // candidates are absent or still growing and get skipped for the
+      // price of one texture read.
+      const float TRAIL_FADE = 2.2;
+      int maxDy = int(ceil(1.0 / uCellSize)) + 1;
+      vec2 occTexel = vec2(1.0) / uOccGridDim;
+
+      for (int dy = 0; dy <= 22; dy++){
+        if (dy > maxDy) break;
+        for (int dx = -1; dx <= 1; dx++){
+          vec2 cell = cellBase + vec2(float(dx), float(dy));
+
+          vec2 occUv = (cell + vec2(1.0) + 0.5) * occTexel;
+          if (texture2D(uOccTex, occUv).r < 0.5) continue; // cheap: not falling, skip the real check
+
+          CellState cs = cellState(cell, uCellSize, uTime);
+          if (!cs.present || !cs.falling) continue; // occupancy texel and cell hash always agree in practice; this is just defensive
+
+          Droplet dr = shadeDroplet(p, vUv, cs.pos, cs.radius, lightDir, uPlaneAspect);
+          if (dr.hit) {
+            float w = dr.w;
+            totalW += w;
+            accumUv += dr.uv * w;
+            accumRim += dr.rim * w;
+            accumAmbient += dr.ambient * w;
+            accumDark += dr.dark * w;
+          }
+
+          // Trail: a thin, fading refractive smear along the path already
+          // traveled. Solved in closed form rather than stepped — invert
+          // the fall kinematics for the exact time this droplet was at
+          // this pixel's height, then check how far sideways (wobble-
+          // adjusted) and how long ago that was.
+          if (p.y < cs.homeY && p.y > cs.pos.y) {
+          float t = sqrt(max(0.0, 2.0 * (cs.homeY - p.y) / cs.accel));
+          if (t <= cs.tFall) {
+            float trailX = cs.homeX + cs.wobbleAmp * sin(cs.wobbleFreq*t + cs.wobblePhase);
+            float recency = cs.tFall - t;
+            float fade = 1.0 - smoothstep(0.0, TRAIL_FADE, recency);
+            float radiusAtT = radiusAtFallTime(cs.releaseR, cs.accel, t);
+            float dxT = abs(p.x - trailX);
+
+            if (fade > 0.01) {
+              // Narrow band (was up to 0.55x the droplet's own radius —
+              // wide enough, combined with the flat-topped weight below
+              // and a strong UV pull, to read as a solid hard-edged wedge
+              // instead of a thin streak, especially for large droplets;
+              // confirmed by rendering with trails disabled and diffing —
+              // every dark wedge came from exactly this).
+              float halfW = mix(radiusAtT*0.22, radiusAtT*0.07, clamp(recency/TRAIL_FADE, 0.0, 1.0));
+              if (dxT < halfW) {
+                float trailT = dxT / halfW;
+                // Smooth taper across the ENTIRE width down to the edge —
+                // the old version was flat (full weight) out to 55% of the
+                // width and only feathered the outer sliver, which is what
+                // made it look like a solid bar with a hard edge rather
+                // than a soft smear.
+                float w = fade * (1.0 - smoothstep(0.0, 1.0, trailT)) * 0.4;
+                vec2 centerUv = vec2(trailX / uPlaneAspect, p.y);
+                // Gentle pull toward the historical position (was 40%) —
+                // strong enough for a hint of lens-like bending, weak
+                // enough that it can't sample a patch of background far
+                // enough away to read as a mismatched dark patch.
+                vec2 zoomedUv = mix(centerUv, vUv, 0.85);
+                totalW += w;
+                accumUv += zoomedUv * w;
+                accumAmbient += vec3(0.03, 0.035, 0.045) * w;
+              }
+            }
+          }
+        }
+      }
+      }
+
+      // ── Sitting/growing droplets: this pixel's immediate 3x3 neighborhood,
+      // exactly the original static-grid search. mergeVisibilityAt is
+      // evaluated per droplet (using its own fixed center), not per pixel,
+      // so a droplet absorbed by a falling one fades out and back in over
+      // ~2s as a single shape — the glass slowly re-wetting — rather than
+      // being sliced into a visible half and a faded half.
+      for (int oy = -1; oy <= 1; oy++){
+        for (int ox = -1; ox <= 1; ox++){
+          vec2 cell = cellBase + vec2(float(ox), float(oy));
+          CellState cs = cellState(cell, uCellSize, uTime);
+          if (!cs.present || cs.falling) continue;
+
+          Droplet dr = shadeDroplet(p, vUv, cs.pos, cs.radius, lightDir, uPlaneAspect);
+          if (!dr.hit) continue;
+
+          float mergeVis = mergeVisibilityAt(cs.pos, cs.radius);
+          float w = dr.w * mergeVis;
+          totalW += w;
+          accumUv += dr.uv * w;
+          accumRim += dr.rim * w;
+          accumAmbient += dr.ambient * w;
+          accumDark += dr.dark * w;
+        }
+      }
+
+      bool hit = totalW > 0.0001;
+      vec2 sampleUv = hit ? (accumUv / totalW) : vUv;
+
+      vec2 bgUv = coverUv(sampleUv, uPlaneAspect, uBgAspect);
+      vec3 col = texture2D(uBgTex, clamp(bgUv, 0.0, 1.0)).rgb;
+
+      if (hit) {
+        col += accumAmbient / totalW;
+        col += accumRim / totalW;
+        col *= 1.0 - accumDark / totalW;
+      }
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+});
+const glassMesh = new THREE.Mesh(glassGeo, glassMat);
+mainScene.add(glassMesh);
+
+function updateGlassPlaneSize(){
+  const { width, height } = frustumSizeAtZ(camera, GLASS_Z);
+  glassMesh.scale.set(width, height, 1);
+  glassMat.uniforms.uPlaneAspect.value = width / height;
+}
+updateGlassPlaneSize();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TEMPORARY DEBUG OVERLAY — safe to delete this whole block, the
+// #debugOverlay div, and the #debugOverlay CSS rule to remove it entirely.
+// Toggle off without deleting anything by setting this to false.
+//
+// This is a *parallel, read-only* re-derivation of the unified cell
+// lifecycle in plain JS — it mirrors CellState/cellState()/
+// radiusAtFallTime() from the glass fragment shader verbatim, but does not
+// read from or write to the shader in any way, so it cannot affect
+// rendering or simulation behavior. It exists only because the real
+// simulation runs entirely on the GPU (no JS-side droplet list to just
+// inspect) — this is how we get a number out of it without a GPU readback
+// every frame.
+//
+// Scope note: since the falling/trail lifecycle now runs on the actual
+// ambient grid (there's no separate lane population anymore), this counts
+// every cell in that same grid — growing and falling together are the
+// whole visible droplet field, not a subset of it.
+//
+// "mid-trail" isn't a distinct state in the simulation — every falling
+// droplet has a continuously fading trail behind it the entire time it's
+// falling. Here it's approximated as "falling, and has been falling for at
+// least 0.05s" (i.e. excluding the very instant of release, when the trail
+// is still zero-length).
+const DEBUG_OVERLAY_ENABLED = true;
+
+function debugHash1(x, y) {
+  const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+  return s - Math.floor(s);
+}
+// Mirrors hash2()'s y-component exactly (its x-component is the same
+// formula as debugHash1, but the y-component uses a different dot-product
+// pair) — needed for an accurate jittered home-Y, since even a small
+// discrepancy there shifts fallDur/cycleDur enough to occasionally
+// misclassify a cell right at a grow/fall boundary.
+function debugHash2y(x, y) {
+  const s = Math.sin(x * 269.5 + y * 183.3) * 43758.5453123;
+  return s - Math.floor(s);
+}
+function debugMix(a, b, t) { return a + (b - a) * t; }
+function debugMod(x, y) { return x - y * Math.floor(x / y); }
+function debugSmoothstep(e0, e1, x) {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+}
+
+// Mirrors CellState/cellState() from the fragment shader exactly (minus the
+// wobble/position fields the overlay doesn't need to report).
+function debugCellState(cellX, cellY, cellSize, uTimeIn) {
+  const presence = debugHash1(cellX, cellY);
+  if (presence > 0.5) return { present: false };
+
+  const jY = debugHash2y(cellX + 17.0, cellY + 17.0) - 0.5;
+  const homeY = (cellY + 0.5 + jY * 0.85) * cellSize;
+  const sizeHash = Math.pow(debugHash1(cellX + 91.3, cellY + 91.3), 2.6);
+  const releaseR = debugMix(0.020, 0.095, sizeHash);
+
+  const exitY = -0.12;
+  const fallDist = Math.max(homeY - exitY, 0.05);
+  const accel = debugMix(0.05, 0.085, debugHash1(cellX + 71.0, cellY + 71.0));
+  const growDur = debugMix(7.0, 15.0, debugHash1(cellX + 11.0, cellY + 11.0));
+  const fallDur = Math.sqrt(2.0 * fallDist / accel);
+  const cycleDur = growDur + fallDur;
+  const phaseOffset = debugHash1(cellX + 5.0, cellY + 5.0) * 97.0;
+
+  const cycleT = debugMod(uTimeIn + phaseOffset, cycleDur);
+
+  if (cycleT < growDur) {
+    const growT = cycleT / growDur;
+    const radius = releaseR * debugMix(0.12, 1.0, debugSmoothstep(0.0, 1.0, growT));
+    return { present: true, falling: false, posY: homeY, radius, tFall: 0 };
+  } else {
+    const tFall = cycleT - growDur;
+    const radius = Math.min(releaseR + 0.10 * (0.5 * accel * tFall * tFall), releaseR * 1.6);
+    const posY = homeY - 0.5 * accel * tFall * tFall;
+    return { present: true, falling: true, posY, radius, tFall };
+  }
+}
+
+const debugOverlayEl = document.getElementById('debugOverlay');
+let debugLogAccum = 0;
+function updateDebugOverlay(uTimeNow, dt) {
+  if (!DEBUG_OVERLAY_ENABLED) return;
+
+  const cellSize = glassMat.uniforms.uCellSize.value;
+  const planeAspect = glassMat.uniforms.uPlaneAspect.value;
+  const minCol = -1, maxCol = Math.ceil(planeAspect / cellSize) + 1;
+  const minRow = -1, maxRow = Math.ceil(1.0 / cellSize) + 1;
+
+  let growingCount = 0, fallingCount = 0, trailCount = 0;
+  let largest = null;
+  for (let cy = minRow; cy <= maxRow; cy++) {
+    for (let cx = minCol; cx <= maxCol; cx++) {
+      const cs = debugCellState(cx, cy, cellSize, uTimeNow);
+      if (!cs.present) continue;
+      if (cs.falling) {
+        fallingCount++;
+        if (cs.tFall > 0.05) trailCount++;
+      } else {
+        growingCount++;
+      }
+      if (!largest || cs.radius > largest.radius) {
+        largest = { cx, cy, ...cs };
+      }
+    }
+  }
+  const total = growingCount + fallingCount;
+
+  const lines = [
+    `[cell sim] droplets: ${total}  (growing ${growingCount} / falling ${fallingCount} / mid-trail ${trailCount})`,
+    largest
+      ? `largest: cell(${largest.cx},${largest.cy})  r=${largest.radius.toFixed(4)}  y=${largest.posY.toFixed(3)}  [${largest.falling ? 'falling' : 'growing'}]`
+      : `largest: none currently active`,
+  ];
+  if (debugOverlayEl) debugOverlayEl.textContent = lines.join('\n');
+
+  debugLogAccum += dt;
+  if (debugLogAccum >= 2.0) {
+    debugLogAccum = 0;
+    console.log(
+      `[rain debug] droplets=${total} growing=${growingCount} falling=${fallingCount} midTrail=${trailCount}` +
+      (largest ? ` | largest: cell=(${largest.cx},${largest.cy}) r=${largest.radius.toFixed(4)} y=${largest.posY.toFixed(3)} state=${largest.falling ? 'falling' : 'growing'}` : ' | largest: none active')
+    );
+  }
+}
+// ═══════════════════ END TEMPORARY DEBUG OVERLAY ═══════════════════════════
+
+// ── Render loop ───────────────────────────────────────────────────────────────
+// The bokeh layer stays static (re-rendered only on resize), but the glass
+// shader now animates: droplet growth/fall/trail/merge timing all live in
+// uTime, driven by an accumulator (not THREE.Clock's own elapsed time) so it
+// advances in lockstep with the same clamped dt used for fps, and never
+// jumps by a huge amount after the tab was backgrounded.
+const fpsEl = document.getElementById('fps');
+let fpsFrames = 0, fpsAccum = 0;
+let simTime = 0;
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  simTime += dt;
+  glassMat.uniforms.uTime.value = simTime;
+
+  updateOccupancyRT(simTime);
+  renderer.render(mainScene, camera);
+  updateDebugOverlay(simTime, dt); // TEMPORARY DEBUG — see block above
+
+  fpsFrames++; fpsAccum += dt;
+  if (fpsAccum >= 0.5) {
+    fpsEl.textContent = `${(fpsFrames/fpsAccum).toFixed(1)} fps`;
+    fpsFrames = 0; fpsAccum = 0;
+  }
+});
+
+</script>
+</body>
+</html>
