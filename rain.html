@@ -404,17 +404,36 @@ const SHARED_CELL_GLSL = `
 // cells' coordinates together would decode to a nonsense cell that doesn't
 // exist — this must snap, not blend.
 function computeOccupancyGridSize(cellSize, planeAspect){
-  const cols = Math.ceil(planeAspect / cellSize) + 3;
+  // Margin is 2 cells on each side (4 total, +1 rounding safety): the
+  // falling-droplet search now looks dx = -2..2 columns away from each
+  // pixel's own cell (see the main shader and mergeVisibilityAt below —
+  // widened from -1..1 after real-device testing showed droplets whose
+  // rendered footprint reaches a 2nd neighboring column were getting
+  // hard-clipped at the old, too-narrow -1..1 window instead of fading at
+  // their own circular edge). The occupancy texture's own margin has to
+  // match that widened lookup range or it clamps to the wrong edge texel.
+  const cols = Math.ceil(planeAspect / cellSize) + 5;
   // Rows must cover every cell the main shader's falling-droplet search can
   // actually reach, not just the visible grid: a pixel near the TOP of the
   // screen searches up to maxDy rows above itself (same maxDy as the main
-  // shader — roughly one full screen height of rows), so the worst-case
-  // cell index it can query is roughly DOUBLE the visible row count —
-  // cells whose home position is above the visible top edge, falling into
-  // view. Sizing this too small silently clamps those lookups to the
-  // wrong edge texel; verified by diffing against the exhaustive
-  // per-pixel search, which caught exactly this (~5-9% of pixels wrong)
-  // before this fix.
+  // shader), so the worst-case cell index it can query is roughly DOUBLE
+  // the visible row count — cells whose home position is above the visible
+  // top edge, falling into view. Sizing this too small silently clamps
+  // those lookups to the wrong edge texel; verified by diffing against the
+  // exhaustive per-pixel search, which caught exactly this (~5-9% of
+  // pixels wrong) before this fix.
+  //
+  // This same 2x+3 formula must also be used for the main shader's OWN
+  // maxDy/maxDyT (see below) — not just this texture's sizing. Until now
+  // only the texture got the doubled margin; the shader's actual per-pixel
+  // search loop was still bounded by the old, too-small `+1` formula, so it
+  // never even generated the far-enough cell coordinates to benefit from
+  // the texture having room for them. That mismatch — not the occupancy
+  // pre-pass architecture itself — was the real cause of the hard-edged
+  // rectangular seams seen on real iPad hardware: confirmed by reproducing
+  // the identical artifact in a from-scratch brute-force build with no
+  // occupancy pre-pass and no render-target switching at all, then curing
+  // it purely by widening this search range.
   const visibleRows = Math.ceil(1.0 / cellSize);
   const rows = visibleRows * 2 + 3;
   return { cols, rows };
@@ -662,14 +681,14 @@ const glassMat = new THREE.ShaderMaterial({
     float mergeVisibilityAt(vec2 targetP, float targetRadius){
       float vis = 1.0;
       vec2 cellBaseT = floor(targetP / uCellSize);
-      int maxDyT = int(ceil(1.0 / uCellSize)) + 1;
+      int maxDyT = int(ceil(1.0 / uCellSize)) * 2 + 3;
       vec2 occTexelT = vec2(1.0) / uOccGridDim;
 
-      for (int dy = 0; dy <= 22; dy++){
+      for (int dy = 0; dy <= 50; dy++){
         if (dy > maxDyT) break;
-        for (int dx = -1; dx <= 1; dx++){
+        for (int dx = -2; dx <= 2; dx++){
           vec2 cell = cellBaseT + vec2(float(dx), float(dy));
-          vec2 occUv = (cell + vec2(1.0) + 0.5) * occTexelT;
+          vec2 occUv = (cell + vec2(2.0) + 0.5) * occTexelT;
           if (texture2D(uOccTex, occUv).r < 0.5) continue;
 
           // No redundant "is this cell really falling" recheck here — see
@@ -707,7 +726,7 @@ const glassMat = new THREE.ShaderMaterial({
       // below — the mesh, camera, and coordinate mapping are all unchanged,
       // only the render target and output differ.
       if (uOccPassMode > 0.5) {
-        vec2 occCell = floor(vUv * uOccGridDim) - vec2(1.0);
+        vec2 occCell = floor(vUv * uOccGridDim) - vec2(2.0);
         CellState occCs = cellState(occCell, uCellSize, uTime);
         float falling = (occCs.present && occCs.falling) ? 1.0 : 0.0;
         gl_FragColor = vec4(falling, 0.0, 0.0, 1.0);
@@ -741,15 +760,15 @@ const glassMat = new THREE.ShaderMaterial({
       // candidates are absent or still growing and get skipped for the
       // price of one texture read.
       const float TRAIL_FADE = 2.2;
-      int maxDy = int(ceil(1.0 / uCellSize)) + 1;
+      int maxDy = int(ceil(1.0 / uCellSize)) * 2 + 3;
       vec2 occTexel = vec2(1.0) / uOccGridDim;
 
-      for (int dy = 0; dy <= 22; dy++){
+      for (int dy = 0; dy <= 50; dy++){
         if (dy > maxDy) break;
-        for (int dx = -1; dx <= 1; dx++){
+        for (int dx = -2; dx <= 2; dx++){
           vec2 cell = cellBase + vec2(float(dx), float(dy));
 
-          vec2 occUv = (cell + vec2(1.0) + 0.5) * occTexel;
+          vec2 occUv = (cell + vec2(2.0) + 0.5) * occTexel;
           if (texture2D(uOccTex, occUv).r < 0.5) continue; // cheap: not falling, skip the real check
 
           // Deliberately NOT re-verifying "is this cell actually falling"
@@ -829,14 +848,20 @@ const glassMat = new THREE.ShaderMaterial({
       }
       }
 
-      // ── Sitting/growing droplets: this pixel's immediate 3x3 neighborhood,
-      // exactly the original static-grid search. mergeVisibilityAt is
-      // evaluated per droplet (using its own fixed center), not per pixel,
-      // so a droplet absorbed by a falling one fades out and back in over
-      // ~2s as a single shape — the glass slowly re-wetting — rather than
-      // being sliced into a visible half and a faded half.
-      for (int oy = -1; oy <= 1; oy++){
-        for (int ox = -1; ox <= 1; ox++){
+      // ── Sitting/growing droplets: this pixel's immediate neighborhood.
+      // Widened from a 3x3 (±1 cell) search to 5x5 (±2 cells) after
+      // real-device testing showed sitting droplets large enough to
+      // visually reach a 2nd-nearest cell were getting hard-clipped at the
+      // old ±1 window's edge instead of fading at their own circular rim —
+      // the same class of bug as the falling-droplet search above, just in
+      // the static neighborhood rather than the time-integrated one.
+      // mergeVisibilityAt is evaluated per droplet (using its own fixed
+      // center), not per pixel, so a droplet absorbed by a falling one
+      // fades out and back in over ~2s as a single shape — the glass
+      // slowly re-wetting — rather than being sliced into a visible half
+      // and a faded half.
+      for (int oy = -2; oy <= 2; oy++){
+        for (int ox = -2; ox <= 2; ox++){
           vec2 cell = cellBase + vec2(float(ox), float(oy));
           CellState cs = cellState(cell, uCellSize, uTime);
           if (!cs.present || cs.falling) continue;
