@@ -165,6 +165,7 @@ const bokehRT = new THREE.WebGLRenderTarget(bokehRT0.w, bokehRT0.h, {
   format: THREE.RGBAFormat,
   depthBuffer: false,
   stencilBuffer: false,
+  generateMipmaps: false,
 });
 const BOKEH_RT_ASPECT = BOKEH_RT_ASPECT_FIXED;
 
@@ -415,6 +416,7 @@ const occRT = new THREE.WebGLRenderTarget(occGrid0.cols, occGrid0.rows, {
   format: THREE.RGBAFormat,
   depthBuffer: false,
   stencilBuffer: false,
+  generateMipmaps: false,
 });
 
 const occScene = new THREE.Scene();
