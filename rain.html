@@ -210,7 +210,27 @@ const bokehMat = new THREE.ShaderMaterial({
     }
   `,
   fragmentShader: `
+    // iOS Safari's WebGL implementation defaults fragment shaders to
+    // mediump unless highp is explicitly requested and supported — mediump
+    // is a REAL reduced precision there (~10-bit mantissa), unlike many
+    // desktop drivers that silently run mediump as highp and hide the
+    // difference entirely. That gap is a well-known source of exactly
+    // this kind of grid-aligned banding: the hash functions below multiply
+    // by large constants (43758.5453123) and take sin() of fairly large
+    // dot-product arguments, which loses meaningful precision in mediump;
+    // since the identical cellState() math runs in two separate compiled
+    // programs (the occupancy pre-pass and this shader), any precision-
+    // driven rounding difference between them shows up as the two
+    // disagreeing about a cell's state at the coarse boundaries of the
+    // occupancy grid — i.e. hard-edged rectangular seams. highp is
+    // guarded (not all platforms support it in the fragment stage) rather
+    // than declared unconditionally, which would fail to compile anywhere
+    // it isn't available.
+    #ifdef GL_FRAGMENT_PRECISION_HIGH
+    precision highp float;
+    #else
     precision mediump float;
+    #endif
     varying vec2 vUv;
     uniform vec2  uPos[${NUM_BOKEH}];
     uniform float uRadius[${NUM_BOKEH}];
@@ -425,7 +445,27 @@ const occMat = new THREE.ShaderMaterial({
     }
   `,
   fragmentShader: `
+    // iOS Safari's WebGL implementation defaults fragment shaders to
+    // mediump unless highp is explicitly requested and supported — mediump
+    // is a REAL reduced precision there (~10-bit mantissa), unlike many
+    // desktop drivers that silently run mediump as highp and hide the
+    // difference entirely. That gap is a well-known source of exactly
+    // this kind of grid-aligned banding: the hash functions below multiply
+    // by large constants (43758.5453123) and take sin() of fairly large
+    // dot-product arguments, which loses meaningful precision in mediump;
+    // since the identical cellState() math runs in two separate compiled
+    // programs (the occupancy pre-pass and this shader), any precision-
+    // driven rounding difference between them shows up as the two
+    // disagreeing about a cell's state at the coarse boundaries of the
+    // occupancy grid — i.e. hard-edged rectangular seams. highp is
+    // guarded (not all platforms support it in the fragment stage) rather
+    // than declared unconditionally, which would fail to compile anywhere
+    // it isn't available.
+    #ifdef GL_FRAGMENT_PRECISION_HIGH
+    precision highp float;
+    #else
     precision mediump float;
+    #endif
     varying vec2 vUv;
     uniform float uCellSize;
     uniform float uTime;
@@ -510,7 +550,27 @@ const glassMat = new THREE.ShaderMaterial({
     }
   `,
   fragmentShader: `
+    // iOS Safari's WebGL implementation defaults fragment shaders to
+    // mediump unless highp is explicitly requested and supported — mediump
+    // is a REAL reduced precision there (~10-bit mantissa), unlike many
+    // desktop drivers that silently run mediump as highp and hide the
+    // difference entirely. That gap is a well-known source of exactly
+    // this kind of grid-aligned banding: the hash functions below multiply
+    // by large constants (43758.5453123) and take sin() of fairly large
+    // dot-product arguments, which loses meaningful precision in mediump;
+    // since the identical cellState() math runs in two separate compiled
+    // programs (the occupancy pre-pass and this shader), any precision-
+    // driven rounding difference between them shows up as the two
+    // disagreeing about a cell's state at the coarse boundaries of the
+    // occupancy grid — i.e. hard-edged rectangular seams. highp is
+    // guarded (not all platforms support it in the fragment stage) rather
+    // than declared unconditionally, which would fail to compile anywhere
+    // it isn't available.
+    #ifdef GL_FRAGMENT_PRECISION_HIGH
+    precision highp float;
+    #else
     precision mediump float;
+    #endif
     varying vec2 vUv;
     uniform sampler2D uBgTex;
     uniform float uBgAspect;

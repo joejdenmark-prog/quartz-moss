@@ -210,7 +210,11 @@ const bokehMat = new THREE.ShaderMaterial({
     }
   `,
   fragmentShader: `
+    #ifdef GL_FRAGMENT_PRECISION_HIGH
+    precision highp float;
+    #else
     precision mediump float;
+    #endif
     varying vec2 vUv;
     uniform vec2  uPos[${NUM_BOKEH}];
     uniform float uRadius[${NUM_BOKEH}];
@@ -430,7 +434,11 @@ const occMat = new THREE.ShaderMaterial({
     }
   `,
   fragmentShader: `
+    #ifdef GL_FRAGMENT_PRECISION_HIGH
+    precision highp float;
+    #else
     precision mediump float;
+    #endif
     varying vec2 vUv;
     uniform float uCellSize;
     uniform float uTime;
@@ -515,7 +523,11 @@ const glassMat = new THREE.ShaderMaterial({
     }
   `,
   fragmentShader: `
+    #ifdef GL_FRAGMENT_PRECISION_HIGH
+    precision highp float;
+    #else
     precision mediump float;
+    #endif
     varying vec2 vUv;
     uniform sampler2D uBgTex;
     uniform float uBgAspect;
