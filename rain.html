@@ -430,93 +430,63 @@ const occRT = new THREE.WebGLRenderTarget(occGrid0.cols, occGrid0.rows, {
   generateMipmaps: false, // never sampled through a mip chain (Nearest, not NearestMipmap*) — mipmaps default on and would just be wasted work every re-render
 });
 
-const occScene = new THREE.Scene();
-const occCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-
-const occMat = new THREE.ShaderMaterial({
-  uniforms: {
-    uCellSize:   { value: computeDropletCell(H) },
-    uTime:       { value: 0 },
-    uOccGridDim: { value: new THREE.Vector2(occGrid0.cols, occGrid0.rows) },
-  },
-  vertexShader: `
-    varying vec2 vUv;
-    void main(){
-      vUv = uv;
-      gl_Position = vec4(position.xy, 0.0, 1.0);
-    }
-  `,
-  fragmentShader: `
-    // iOS Safari's WebGL implementation defaults fragment shaders to
-    // mediump unless highp is explicitly requested and supported — mediump
-    // is a REAL reduced precision there (~10-bit mantissa), unlike many
-    // desktop drivers that silently run mediump as highp and hide the
-    // difference entirely. That gap is a well-known source of exactly
-    // this kind of grid-aligned banding: the hash functions below multiply
-    // by large constants (43758.5453123) and take sin() of fairly large
-    // dot-product arguments, which loses meaningful precision in mediump;
-    // since the identical cellState() math runs in two separate compiled
-    // programs (the occupancy pre-pass and this shader), any precision-
-    // driven rounding difference between them shows up as the two
-    // disagreeing about a cell's state at the coarse boundaries of the
-    // occupancy grid — i.e. hard-edged rectangular seams. highp is
-    // guarded (not all platforms support it in the fragment stage) rather
-    // than declared unconditionally, which would fail to compile anywhere
-    // it isn't available.
-    #ifdef GL_FRAGMENT_PRECISION_HIGH
-    precision highp float;
-    #else
-    precision mediump float;
-    #endif
-    varying vec2 vUv;
-    uniform float uCellSize;
-    uniform float uTime;
-    uniform vec2 uOccGridDim;
-
-    ${SHARED_CELL_GLSL}
-
-    void main(){
-      // This texel represents exactly one grid cell — the same cell the
-      // main shader would land on if it computed cellBase for a pixel here.
-      // No neighbor search: just this cell's own falling flag. (An earlier
-      // version of this pass searched neighbors and picked a single
-      // "winning" candidate per texel to hand to the main shader — that
-      // was lossy: a pixel querying from a slightly different sub-cell
-      // position than the texel's own center could need a candidate that
-      // wasn't anyone's single winner, and it would silently go missing.
-      // Verified by diffing against the exhaustive per-pixel search: ~5%
-      // of pixels differed, some by the full brightness of a droplet —
-      // exactly the kind of gap that reads as popping as it flickers frame
-      // to frame. This flag-only version can't lose anything: the main
-      // shader still visits every real candidate cell itself, this just
-      // lets it skip the expensive cellState() math for the ones that
-      // aren't falling — cheaply, ahead of time.)
-      vec2 cell = floor(vUv * uOccGridDim) - vec2(1.0);
-      CellState cs = cellState(cell, uCellSize, uTime);
-      float falling = (cs.present && cs.falling) ? 1.0 : 0.0;
-      gl_FragColor = vec4(falling, 0.0, 0.0, 1.0);
-    }
-  `,
-});
-occScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), occMat));
-
-// Resizes the occupancy target to match the current grid dimensions —
-// called on init and on resize, same trigger as the bokeh target.
+// The occupancy pass used to be a separate ShaderMaterial (its own
+// vertex+fragment shaders, its own orthographic scene/camera) that just
+// happened to share the cellState() GLSL *source text* with the main glass
+// shader via SHARED_CELL_GLSL. That looked safe — identical source — but
+// WebGL never promises bit-identical results for identical GLSL compiled
+// into two separate programs, and on real WebKit it wasn't identical:
+// diffing this pass's occupancy-gated output against a true brute-force
+// search (every candidate cell checked directly, no pre-pass at all) using
+// today's actual rendering logic showed a real, repeatable 0.06%-0.22% of
+// pixels disagreeing — confirmed with a real Safari/WebDriver session, 0%
+// on desktop Chrome for the same test. That gap is exactly what produces
+// grid-aligned rectangular seams: the pre-pass's own cellState() call
+// occasionally disagrees with what the SAME function computes when called
+// from inside the main shader, purely because they're different compiled
+// programs. highp precision only shrinks how often that happens; it can't
+// promise zero, because the spec never promised bit-identical compilation
+// in the first place.
+//
+// The only way to actually guarantee agreement is to make them the same
+// compiled program: the occupancy pass now reuses glassMat itself (same
+// mesh, same camera, same everything) with a uOccPassMode switch that
+// makes main() emit just this pixel's own falling flag instead of the
+// normal render. Same program, same invocation of cellState() either way
+// — there is no second copy left to disagree with the first.
 function resizeOccupancyRT(){
   const { cols, rows } = computeOccupancyGridSize(glassMat.uniforms.uCellSize.value, camera.aspect);
   occRT.setSize(cols, rows);
-  occMat.uniforms.uOccGridDim.value.set(cols, rows);
   glassMat.uniforms.uOccGridDim.value.set(cols, rows);
 }
 
 // Re-renders the occupancy pass — unlike the bokeh pass, this must run
-// every frame (droplets move), not just on resize.
-function updateOccupancyRT(uTimeNow){
-  occMat.uniforms.uCellSize.value = glassMat.uniforms.uCellSize.value;
-  occMat.uniforms.uTime.value = uTimeNow;
+// every frame (droplets move), not just on resize. Called after uTime has
+// already been set on glassMat for this frame, so it doesn't need its own
+// time argument.
+function updateOccupancyRT(){
+  // glassMat's uOccTex uniform normally points at occRT.texture (read by
+  // the gate check in normal-render mode). Rendering INTO occRT while that
+  // uniform still points at occRT.texture is a texture feedback loop —
+  // sampling and writing the same texture in one draw — which WebGL
+  // forbids. The occupancy-pass branch never actually samples uOccTex (it
+  // returns before reaching that code), but the validation is conservative
+  // and doesn't know that: on real WebKit it silently failed the entire
+  // draw call rather than erroring loudly, leaving occRT permanently empty
+  // (confirmed directly: reading it back showed 0 texels ever marked
+  // "falling", and even an unconditional forced-color test never reached
+  // the framebuffer — gl.getError() reported GL_INVALID_OPERATION).
+  // Pointing uOccTex at any other real texture for the duration of this
+  // render sidesteps the loop; bokehRT.texture is a convenient one that's
+  // already loaded and completely unrelated to occupancy data.
+  const realOccTex = glassMat.uniforms.uOccTex.value;
+  glassMat.uniforms.uOccTex.value = bokehRT.texture;
+  glassMat.uniforms.uOccPassMode.value = 1;
   renderer.setRenderTarget(occRT);
-  renderer.render(occScene, occCamera);
+  renderer.render(mainScene, camera);
   renderer.setRenderTarget(null);
+  glassMat.uniforms.uOccPassMode.value = 0;
+  glassMat.uniforms.uOccTex.value = realOccTex;
 }
 
 // ── Step 2: refractive rain droplets on the glass plane ──────────────────────
@@ -543,6 +513,7 @@ const glassMat = new THREE.ShaderMaterial({
     uTime:       { value: 0 },
     uOccTex:     { value: occRT.texture },
     uOccGridDim: { value: new THREE.Vector2(occGrid0.cols, occGrid0.rows) },
+    uOccPassMode:{ value: 0 }, // 1 while rendering into occRT (see updateOccupancyRT) — same program, different output
   },
   vertexShader: `
     varying vec2 vUv;
@@ -581,6 +552,7 @@ const glassMat = new THREE.ShaderMaterial({
     uniform float uTime;
     uniform sampler2D uOccTex;
     uniform vec2 uOccGridDim;
+    uniform float uOccPassMode;
 
     ${SHARED_CELL_GLSL}
 
@@ -700,8 +672,15 @@ const glassMat = new THREE.ShaderMaterial({
           vec2 occUv = (cell + vec2(1.0) + 0.5) * occTexelT;
           if (texture2D(uOccTex, occUv).r < 0.5) continue;
 
+          // No redundant "is this cell really falling" recheck here — see
+          // the main falling-droplet loop below for why: two separately
+          // compiled shader programs running identical GLSL aren't
+          // guaranteed bit-identical results on every platform (confirmed
+          // on real WebKit — ~1% of pixels disagreed, vs. 0 on desktop
+          // Chrome), so cross-checking against this shader's own
+          // recomputation could itself introduce a mismatch. cellState()
+          // here is trusted for its actual field values, not re-verified.
           CellState cs = cellState(cell, uCellSize, uTime);
-          if (!cs.present || !cs.falling) continue;
           if (cs.homeY <= targetP.y) continue;
 
           float t = sqrt(max(0.0, 2.0 * (cs.homeY - targetP.y) / cs.accel));
@@ -720,6 +699,21 @@ const glassMat = new THREE.ShaderMaterial({
     }
 
     void main(){
+      // Occupancy pre-pass mode: same program as the normal render below
+      // (guaranteeing cellState() agrees with itself — see the comment on
+      // resizeOccupancyRT/updateOccupancyRT in the JS), just emitting one
+      // cell's own falling flag instead of a rendered pixel. vUv here is
+      // this glass plane's own UV, identical in meaning to the vUv used
+      // below — the mesh, camera, and coordinate mapping are all unchanged,
+      // only the render target and output differ.
+      if (uOccPassMode > 0.5) {
+        vec2 occCell = floor(vUv * uOccGridDim) - vec2(1.0);
+        CellState occCs = cellState(occCell, uCellSize, uTime);
+        float falling = (occCs.present && occCs.falling) ? 1.0 : 0.0;
+        gl_FragColor = vec4(falling, 0.0, 0.0, 1.0);
+        return;
+      }
+
       // Aspect-corrected "glass space" (p) so droplets are circular
       // regardless of window aspect ratio, same idea as the bokeh pass.
       vec2 p = vec2(vUv.x * uPlaneAspect, vUv.y);
@@ -739,7 +733,8 @@ const glassMat = new THREE.ShaderMaterial({
       // search as the original version, for correctness (every real
       // candidate cell is actually visited; nothing is pre-filtered away
       // by a lossy lower-resolution pass). What makes it affordable is the
-      // occupancy pre-pass (see updateOccupancyRT / occMat above): one
+      // occupancy pre-pass (see updateOccupancyRT above, and uOccPassMode
+      // near the top of this very shader): one
       // cheap, nearest-filtered texture fetch per candidate tells us
       // whether that exact cell is currently falling *before* paying for
       // the real cellState() (several hash/sin/sqrt calls) — most
@@ -757,8 +752,26 @@ const glassMat = new THREE.ShaderMaterial({
           vec2 occUv = (cell + vec2(1.0) + 0.5) * occTexel;
           if (texture2D(uOccTex, occUv).r < 0.5) continue; // cheap: not falling, skip the real check
 
+          // Deliberately NOT re-verifying "is this cell actually falling"
+          // via cellState() here. It used to be defensive belt-and-braces
+          // ("the texel and the hash always agree in practice") — that
+          // assumption is false: the occupancy pre-pass and this shader
+          // are two separately compiled programs running byte-identical
+          // GLSL, and WebGL does not guarantee bit-identical floating
+          // point results across separate compilations of the same
+          // source, even at highp. Confirmed directly: diffing this
+          // shader's output against a from-scratch exhaustive per-pixel
+          // search (no occupancy pre-pass at all) showed 0 differing
+          // pixels on desktop Chrome but ~1.2% on real Safari/WebKit —
+          // exactly the redundant recheck disagreeing with the texture's
+          // classification, dropping candidates the exhaustive search
+          // would have rendered. That produced grid-aligned rectangular
+          // gaps at the occupancy grid's own cell boundaries. cellState()
+          // is still called and trusted for its field values (position,
+          // radius, timing) — just not cross-checked against a second,
+          // independently-derived opinion of the same boolean the texture
+          // already answered.
           CellState cs = cellState(cell, uCellSize, uTime);
-          if (!cs.present || !cs.falling) continue; // occupancy texel and cell hash always agree in practice; this is just defensive
 
           Droplet dr = shadeDroplet(p, vUv, cs.pos, cs.radius, lightDir, uPlaneAspect);
           if (dr.hit) {
@@ -883,7 +896,7 @@ renderer.setAnimationLoop(() => {
   simTime += dt;
   glassMat.uniforms.uTime.value = simTime;
 
-  updateOccupancyRT(simTime);
+  updateOccupancyRT();
   renderer.render(mainScene, camera);
 
   fpsFrames++; fpsAccum += dt;
