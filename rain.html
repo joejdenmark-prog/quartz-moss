@@ -603,16 +603,28 @@ const glassMat = new THREE.ShaderMaterial({
       d.hit = false; d.w = 0.0; d.uv = vec2(0.0); d.rim = vec3(0.0); d.ambient = vec3(0.0); d.dark = 0.0;
       if (radiusP <= 0.0005) return d;
 
-      // Larger droplets stretch into a teardrop/oval rather than staying
-      // perfectly round — gravity pulling on a bigger droplet clinging to
-      // glass elongates it; small ones stay closer to circular. Anisotropic
-      // (and slightly asymmetric) scaling of the local offset before
-      // measuring distance, so the *shape test itself* is oval.
-      float sizeT = smoothstep(0.030, 0.085, radiusP);
-      vec2 dP = p - centerP;
-      vec2 dShaped = dP;
-      dShaped.y /= (1.0 + sizeT*0.55);           // taller than wide
-      dShaped.y -= sizeT * radiusP * 0.16;        // mild top-narrow/bottom-full taper
+      // Larger droplets used to stretch into a teardrop/oval via an
+      // anisotropic (and slightly asymmetric) scaling of the local offset
+      // before measuring distance — gravity pulling on a bigger droplet
+      // clinging to glass elongating it, small ones staying closer to
+      // circular. Removed after extensive real-device + real-WebKit
+      // investigation: ANY non-identity transform of the y-component used
+      // in this shape test — the original stretch+taper, either alone, at
+      // any magnitude down to a hardcoded 1e-5 constant offset with no
+      // variables at all, restructured through half a dozen equivalent
+      // syntactic forms (compound assignment, fresh vec2 construction,
+      // independent scalar intermediates) — reproduced an identical,
+      // pixel-exact hard-edged rectangular clipping artifact on specific
+      // large falling droplets at specific moments, regardless of the
+      // transform's actual numeric magnitude. Only leaving this exactly
+      // equal to the untouched center-relative offset (no y adjustment at
+      // all) avoided it in every configuration tested, on both desktop
+      // Safari/WebKit and desktop Chrome. The precise mechanism was never
+      // identified — it did not behave like a coverage-math, precision, or
+      // search-window bug (all ruled out with direct evidence) — but the
+      // fix below is proven robust across that entire test matrix. Large
+      // droplets render as circles instead of teardrops as a result.
+      vec2 dShaped = p - centerP;
 
       float distP = length(dShaped);
       if (distP >= radiusP) return d;
