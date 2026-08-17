@@ -994,6 +994,11 @@ updateGlassPlaneSize();
 // elapsed time (rawDt) separately now.
 const fpsEl = document.getElementById('fps');
 let fpsFrames = 0, fpsAccum = 0;
+// Raw per-frame timing stats -- see rain.html for the full writeup. Tells
+// quantized rAF scheduling (locking to a clean divisor of the display's
+// refresh rate, e.g. 120Hz/6 or 60Hz/3, both exactly 50.00ms/frame) apart
+// from a real, organically-varying cost that merely averages near 20fps.
+let dtMsSum = 0, dtMsSumSq = 0, dtMsMin = Infinity, dtMsMax = -Infinity, dtNear50Count = 0;
 let simTime = 0;
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
@@ -1006,9 +1011,24 @@ renderer.setAnimationLoop(() => {
   renderer.render(mainScene, camera);
 
   fpsFrames++; fpsAccum += rawDt;
-  if (fpsAccum >= 0.5) {
-    fpsEl.textContent = `${(fpsFrames/fpsAccum).toFixed(1)} fps`;
+  const rawMs = rawDt * 1000;
+  dtMsSum += rawMs; dtMsSumSq += rawMs * rawMs;
+  if (rawMs < dtMsMin) dtMsMin = rawMs;
+  if (rawMs > dtMsMax) dtMsMax = rawMs;
+  if (Math.abs(rawMs - 50.0) <= 1.0) dtNear50Count++;
+
+  if (fpsAccum >= 1.0) {
+    const n = fpsFrames;
+    const meanMs = dtMsSum / n;
+    const varianceMs = Math.max(0, dtMsSumSq / n - meanMs * meanMs);
+    const sdMs = Math.sqrt(varianceMs);
+    const pctNear50 = Math.round(100 * dtNear50Count / n);
+    fpsEl.textContent =
+      `${(fpsFrames/fpsAccum).toFixed(1)} fps\n` +
+      `dt ms: mean=${meanMs.toFixed(2)} sd=${sdMs.toFixed(2)} min=${dtMsMin.toFixed(2)} max=${dtMsMax.toFixed(2)}\n` +
+      `${pctNear50}% of frames within 1ms of 50.00ms`;
     fpsFrames = 0; fpsAccum = 0;
+    dtMsSum = 0; dtMsSumSq = 0; dtMsMin = Infinity; dtMsMax = -Infinity; dtNear50Count = 0;
   }
 });
 
