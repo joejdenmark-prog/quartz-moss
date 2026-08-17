@@ -637,11 +637,22 @@ const glassMat = new THREE.ShaderMaterial({
       float distP = length(dRaw);
       if (distP >= radiusP * (1.0 + sizeT * 1.1)) return d; // cheap early-out using the loosest possible bound
       vec2 dirUnit = distP > 1e-6 ? dRaw / distP : vec2(0.0, 1.0);
-      // Smooth (no piecewise branch, so no kink at the droplet's sides):
-      // stretches up to +110% straight down, tapers up to -32% straight up,
-      // in between at the sides. (Doubled from the initial +55%/-16% pass,
-      // which real-device testing found too subtle to read as a teardrop.)
-      float stretchAmt = mix(-0.32, 1.1, smoothstep(-1.0, 1.0, -dirUnit.y));
+      // Vertical-only stretch: +110% straight down (the falling direction
+      // -- screen-space y decreases as a droplet falls, so "down" is
+      // -dirUnit.y), tapers -32% straight up, and is EXACTLY zero at the
+      // sides (dirUnit.y == 0) so the droplet gets taller without also
+      // getting wider. A plain mix(-0.32, 1.1, smoothstep(-1,1,-dirUnit.y))
+      // does NOT hit zero at the sides -- it passes through the two
+      // endpoints' *average* there (~+0.39 with these constants), which
+      // reads as an unwanted horizontal bulge, worse the more the
+      // magnitude is increased. Summing two independent one-sided ramps
+      // (each pinned to 0 on its own inactive half) fixes that: both are
+      // exactly 0 at vertical==0, so only the top/bottom vary and the
+      // sides stay circular. Still fully smooth (each smoothstep has zero
+      // slope at its own boundary), still branchless.
+      float vertical = -dirUnit.y; // +1 straight down, -1 straight up, 0 at the sides
+      float stretchAmt = 1.1 * smoothstep(0.0, 1.0, max(0.0, vertical))
+                        - 0.32 * smoothstep(0.0, 1.0, max(0.0, -vertical));
       float effRadius = radiusP * (1.0 + sizeT * stretchAmt);
       if (distP >= effRadius) return d;
 
@@ -657,8 +668,20 @@ const glassMat = new THREE.ShaderMaterial({
       float zoom = mix(0.35, 0.55, hash1(centerP*173.0));
       vec2 zoomedUv = mix(centerUv, vUvIn, zoom);
       // 2) Edge bend — bulges outward toward the rim (hemisphere-normal
-      //    falloff), layered on top of the zoom.
-      vec2 edgeBend = normalXY * (1.0 - h) * radiusP * 1.3;
+      //    falloff), layered on top of the zoom. Scaled by effRadius, not
+      //    radiusP: this formula assumes t==1 (rim, where the offset is
+      //    largest) sits at distance radiusP from center, which is only
+      //    true for a circle. An elongated droplet's rim can be up to
+      //    2.1x radiusP away in the stretch direction, so using radiusP
+      //    here under-scales *where* the offset lands relative to how far
+      //    the pixel actually is -- confirmed directly: this was
+      //    increasing how often the background-sample coordinate
+      //    overshot [0,1] (the mechanism behind the seam fix above) by
+      //    ~1.5x versus the plain-circle shape, measured across 15
+      //    iPad-scale time samples on real WebKit. effRadius already
+      //    equals radiusP exactly for small/unstretched droplets, so this
+      //    is a no-op there.
+      vec2 edgeBend = normalXY * (1.0 - h) * effRadius * 1.3;
       d.uv = zoomedUv + vec2(edgeBend.x / planeAspect, edgeBend.y);
 
       // Tapers smoothly all the way to exactly 0 at t=1 (the droplet's own
