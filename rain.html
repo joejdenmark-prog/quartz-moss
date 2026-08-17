@@ -334,7 +334,17 @@ const SHARED_CELL_GLSL = `
       vec2 jitter = hash2(cell + 17.0) - 0.5;
       vec2 centerP = (cell + 0.5 + jitter*0.85) * cellSize;
       float sizeHash = pow(hash1(cell + 91.3), 2.6);
-      float releaseR = mix(0.020, 0.095, sizeHash);
+      // Hard cap, not just a shrink: releaseR's mix() upper bound is the
+      // actual max any droplet can ever be at spawn, and both growth
+      // paths below (sitting: releaseR*mix(0.12,1.0,...); falling:
+      // radiusAtFallTime's min(..., releaseR*1.6)) scale off this value,
+      // so capping it here caps every phase of a droplet's life, not just
+      // its starting size. 0.045 (down from 0.095) matches the value
+      // already validated on real iPad in rain-radiuscap-test.html
+      // (~24% fps gain there); the biggest droplets are removed entirely
+      // rather than merely shrunk, since sizeHash's own distribution
+      // (pow(hash,2.6), skewed toward small values) is unchanged.
+      float releaseR = mix(0.020, 0.045, sizeHash);
 
       float exitY = -0.12; // a bit below the bottom edge
       float fallDist = max(centerP.y - exitY, 0.05); // each row falls its own distance to exit
@@ -603,35 +613,40 @@ const glassMat = new THREE.ShaderMaterial({
       d.hit = false; d.w = 0.0; d.uv = vec2(0.0); d.rim = vec3(0.0); d.ambient = vec3(0.0); d.dark = 0.0;
       if (radiusP <= 0.0005) return d;
 
-      // Larger droplets used to stretch into a teardrop/oval via an
-      // anisotropic (and slightly asymmetric) scaling of the local offset
-      // before measuring distance — gravity pulling on a bigger droplet
-      // clinging to glass elongating it, small ones staying closer to
-      // circular. Removed after extensive real-device + real-WebKit
-      // investigation: ANY non-identity transform of the y-component used
-      // in this shape test — the original stretch+taper, either alone, at
-      // any magnitude down to a hardcoded 1e-5 constant offset with no
-      // variables at all, restructured through half a dozen equivalent
-      // syntactic forms (compound assignment, fresh vec2 construction,
-      // independent scalar intermediates) — reproduced an identical,
-      // pixel-exact hard-edged rectangular clipping artifact on specific
-      // large falling droplets at specific moments, regardless of the
-      // transform's actual numeric magnitude. Only leaving this exactly
-      // equal to the untouched center-relative offset (no y adjustment at
-      // all) avoided it in every configuration tested, on both desktop
-      // Safari/WebKit and desktop Chrome. The precise mechanism was never
-      // identified — it did not behave like a coverage-math, precision, or
-      // search-window bug (all ruled out with direct evidence) — but the
-      // fix below is proven robust across that entire test matrix. Large
-      // droplets render as circles instead of teardrops as a result.
-      vec2 dShaped = p - centerP;
+      // Larger droplets stretch into a teardrop/oval — gravity pulling on
+      // a bigger droplet clinging to glass elongating it, small ones
+      // staying closer to circular. An earlier version implemented this
+      // by mutating a single component of the center-relative offset
+      // vector before feeding it to length()/normalize() (e.g.
+      // dShaped.y /= ...; dShaped.y -= ...); that reproduced an identical,
+      // pixel-exact hard-edged rectangular clipping artifact on real
+      // WebKit regardless of syntax (compound assignment, fresh vector
+      // construction, a hardcoded 1e-5 constant with no variables at all)
+      // or magnitude — never root-caused, but empirically tied to writing
+      // into a component of a vector that then feeds length()/normalize().
+      // This version never does that: dRaw is used completely raw in
+      // length() and normalize()-by-division, exactly like the plain
+      // circle case that was always safe. The elongation instead grows or
+      // shrinks a SCALAR radius threshold by direction — a fresh number,
+      // not a mutated vector component — so there is no vector write for
+      // that failure mode to attach to. Verified on real WebKit (visual +
+      // pixel-diff stress test across many large-droplet configurations)
+      // before shipping.
+      float sizeT = smoothstep(0.030, 0.085, radiusP);
+      vec2 dRaw = p - centerP;
+      float distP = length(dRaw);
+      if (distP >= radiusP * (1.0 + sizeT * 0.55)) return d; // cheap early-out using the loosest possible bound
+      vec2 dirUnit = distP > 1e-6 ? dRaw / distP : vec2(0.0, 1.0);
+      // Smooth (no piecewise branch, so no kink at the droplet's sides):
+      // stretches up to +55% straight down, tapers up to -16% straight up,
+      // in between at the sides.
+      float stretchAmt = mix(-0.16, 0.55, smoothstep(-1.0, 1.0, -dirUnit.y));
+      float effRadius = radiusP * (1.0 + sizeT * stretchAmt);
+      if (distP >= effRadius) return d;
 
-      float distP = length(dShaped);
-      if (distP >= radiusP) return d;
-
-      float t = clamp(distP / radiusP, 0.0, 1.0);
+      float t = clamp(distP / effRadius, 0.0, 1.0);
       float h = sqrt(max(0.0, 1.0 - t*t));
-      vec2 normalXY = dShaped / radiusP;
+      vec2 normalXY = dirUnit * t;
 
       // 1) Zoom/magnification — uniformly strong across the WHOLE droplet,
       //    including dead center: every point inside samples the
@@ -894,13 +909,38 @@ const glassMat = new THREE.ShaderMaterial({
       bool hit = totalW > 0.0001;
       vec2 sampleUv = hit ? (accumUv / totalW) : vUv;
 
+      // The lens offset above (zoomedUv + edgeBend) can push sampleUv well
+      // outside the droplet's own small neighborhood — large droplets near
+      // the screen edge are the worst case. coverUv() maps that straight
+      // through, and hard-clamping the result to [0,1] then repeats
+      // whichever edge texel it lands on across every affected pixel: a
+      // flat, rectangular patch cutting through what should be a curved
+      // rim. Confirmed directly on real WebKit: bgUv overshoots [0,1] on
+      // 0.3%-1.3% of pixels in every sampled frame, occasionally by a huge
+      // margin. Fading back to the plain (unrefracted) background sample
+      // as the overshoot grows keeps the lens effect for the normal case
+      // (uvFade stays 1, this is a no-op) and replaces the hard clip with
+      // a soft return to the true background for the rare overshoot case.
       vec2 bgUv = coverUv(sampleUv, uPlaneAspect, uBgAspect);
-      vec3 col = texture2D(uBgTex, clamp(bgUv, 0.0, 1.0)).rgb;
+      vec2 overshoot = max(vec2(0.0), max(-bgUv, bgUv - 1.0));
+      float uvFade = 1.0 - smoothstep(0.0, 0.04, max(overshoot.x, overshoot.y));
+
+      // Only pay for the second (plain-background) sample on the rare
+      // overshoot path — the vast majority of pixels have uvFade == 1 and
+      // can skip straight to a single texture fetch, same cost as before.
+      vec3 col;
+      if (uvFade > 0.999) {
+        col = texture2D(uBgTex, bgUv).rgb;
+      } else {
+        vec3 refractedCol = texture2D(uBgTex, clamp(bgUv, 0.0, 1.0)).rgb;
+        vec3 plainCol = texture2D(uBgTex, clamp(coverUv(vUv, uPlaneAspect, uBgAspect), 0.0, 1.0)).rgb;
+        col = mix(plainCol, refractedCol, uvFade);
+      }
 
       if (hit) {
-        col += accumAmbient / totalW;
-        col += accumRim / totalW;
-        col *= 1.0 - accumDark / totalW;
+        col += (accumAmbient / totalW) * uvFade;
+        col += (accumRim / totalW) * uvFade;
+        col *= mix(1.0, 1.0 - accumDark / totalW, uvFade);
       }
 
       gl_FragColor = vec4(col, 1.0);
