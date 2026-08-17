@@ -987,24 +987,25 @@ updateGlassPlaneSize();
 
 
 // ── Render loop ───────────────────────────────────────────────────────────────
-// The bokeh layer stays static (re-rendered only on resize), but the glass
-// shader now animates: droplet growth/fall/trail/merge timing all live in
-// uTime, driven by an accumulator (not THREE.Clock's own elapsed time) so it
-// advances in lockstep with the same clamped dt used for fps, and never
-// jumps by a huge amount after the tab was backgrounded.
+// fps counter fix: it used to accumulate the SAME dt clamped for the
+// simulation (capped at 0.05s / 20fps floor), which saturates the
+// displayed number at exactly 20.0fps for any true rate at or below
+// 20fps -- see rain.html for the full writeup. Tracks true wall-clock
+// elapsed time (rawDt) separately now.
 const fpsEl = document.getElementById('fps');
 let fpsFrames = 0, fpsAccum = 0;
 let simTime = 0;
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const rawDt = clock.getDelta();
+  const dt = Math.min(rawDt, 0.05);
   simTime += dt;
   glassMat.uniforms.uTime.value = simTime;
 
   updateOccupancyRT();
   renderer.render(mainScene, camera);
 
-  fpsFrames++; fpsAccum += dt;
+  fpsFrames++; fpsAccum += rawDt;
   if (fpsAccum >= 0.5) {
     fpsEl.textContent = `${(fpsFrames/fpsAccum).toFixed(1)} fps`;
     fpsFrames = 0; fpsAccum = 0;

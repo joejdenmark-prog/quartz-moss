@@ -990,21 +990,38 @@ updateGlassPlaneSize();
 // The bokeh layer stays static (re-rendered only on resize), but the glass
 // shader now animates: droplet growth/fall/trail/merge timing all live in
 // uTime, driven by an accumulator (not THREE.Clock's own elapsed time) so it
-// advances in lockstep with the same clamped dt used for fps, and never
-// jumps by a huge amount after the tab was backgrounded.
+// never jumps by a huge amount after the tab was backgrounded -- capped at
+// 0.05s (a 20fps floor) for that purpose only.
+//
+// The fps counter used to accumulate that SAME capped value as its own
+// elapsed-time denominator. That silently breaks the counter the moment
+// real per-frame time exceeds 50ms: every dt gets clamped to exactly 0.05
+// regardless of how much worse the real frame actually was, so
+// fpsFrames/fpsAccum saturates at a hard ceiling of exactly 20.0 -- a
+// scene truly running at 12fps, or 8fps, reports identically as "20.0
+// fps". Confirmed by simulating both a true-12fps and true-8fps frame
+// sequence through the old formula: both produced 20.000...fps exactly.
+// This is almost certainly why fps read suspiciously exactly-20 across
+// every structurally different build tested (radius cap, antialiasing
+// on/off, elongation on/off) -- the counter couldn't have shown a
+// difference even if there was one, any time the true rate was at or
+// below 20fps. The counter now tracks true wall-clock elapsed time
+// (rawDt, before clamping) separately from the clamped value used for
+// the simulation.
 const fpsEl = document.getElementById('fps');
 let fpsFrames = 0, fpsAccum = 0;
 let simTime = 0;
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const rawDt = clock.getDelta();
+  const dt = Math.min(rawDt, 0.05);
   simTime += dt;
   glassMat.uniforms.uTime.value = simTime;
 
   updateOccupancyRT();
   renderer.render(mainScene, camera);
 
-  fpsFrames++; fpsAccum += dt;
+  fpsFrames++; fpsAccum += rawDt;
   if (fpsAccum >= 0.5) {
     fpsEl.textContent = `${(fpsFrames/fpsAccum).toFixed(1)} fps`;
     fpsFrames = 0; fpsAccum = 0;
