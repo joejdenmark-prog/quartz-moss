@@ -1046,7 +1046,8 @@ renderer.setAnimationLoop(() => {
     fpsEl.textContent =
       `${(fpsFrames/fpsAccum).toFixed(1)} fps\n` +
       `dt ms: mean=${meanMs.toFixed(2)} sd=${sdMs.toFixed(2)} min=${dtMsMin.toFixed(2)} max=${dtMsMax.toFixed(2)}\n` +
-      `${pctNear50}% of frames within 1ms of 50.00ms`;
+      `${pctNear50}% of frames within 1ms of 50.00ms\n` +
+      `canvas: ${canvas.width}x${canvas.height} (${(canvas.width*canvas.height/1e6).toFixed(2)}MP) dpr=${window.devicePixelRatio}`;
     fpsFrames = 0; fpsAccum = 0;
     dtMsSum = 0; dtMsSumSq = 0; dtMsMin = Infinity; dtMsMax = -Infinity; dtNear50Count = 0;
   }
