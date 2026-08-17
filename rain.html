@@ -615,50 +615,42 @@ const glassMat = new THREE.ShaderMaterial({
 
       // Larger droplets stretch into a teardrop/oval — gravity pulling on
       // a bigger droplet clinging to glass elongating it, small ones
-      // staying closer to circular. An earlier version implemented this
-      // by mutating a single component of the center-relative offset
-      // vector before feeding it to length()/normalize() (e.g.
-      // dShaped.y /= ...; dShaped.y -= ...); that reproduced an identical,
-      // pixel-exact hard-edged rectangular clipping artifact on real
-      // WebKit regardless of syntax (compound assignment, fresh vector
-      // construction, a hardcoded 1e-5 constant with no variables at all)
-      // or magnitude — never root-caused, but empirically tied to writing
-      // into a component of a vector that then feeds length()/normalize().
-      // This version never does that: dRaw is used completely raw in
-      // length() and normalize()-by-division, exactly like the plain
-      // circle case that was always safe. The elongation instead grows or
-      // shrinks a SCALAR radius threshold by direction — a fresh number,
-      // not a mutated vector component — so there is no vector write for
-      // that failure mode to attach to. Verified on real WebKit (visual +
-      // pixel-diff stress test across many large-droplet configurations)
-      // before shipping.
-      float sizeT = smoothstep(0.030, 0.085, radiusP);
+      // staying closer to circular. Two direction-dependent-SCALAR-radius
+      // attempts were tried and rejected before this one: driving the
+      // stretch from dirUnit.y (pure angle) produced a smooth function of
+      // angle whose Cartesian boundary still bent back on itself into a
+      // pair of concave notches at the shoulders; driving it from raw
+      // dRaw.y instead was worse (wide flat "wings"). Both were rendered
+      // in isolation (single droplet, no neighbors, no lighting -- just
+      // the hit-test silhouette) on real WebKit to see this directly.
+      // Root cause: a scalar radius threshold that varies smoothly with
+      // angle does not guarantee a convex Cartesian curve -- the curve's
+      // curvature depends on the radius function's rate of change too,
+      // and both smoothstep-based ramps changed fast enough to overshoot.
+      // A true ellipse is convex by construction, so this version scales
+      // the OFFSET anisotropically instead of the threshold, exactly like
+      // the very first (pre-Bug-#2) version -- but as a FRESH vec2
+      // built with vec2(x, y-expression), never by mutating a component
+      // of an existing vector before it feeds length()/normalize(), which
+      // is the specific pattern that was implicated (never root-caused)
+      // in that earlier artifact.
+      // Retuned for the current post-cap radius range (max radiusP is now
+      // ~0.072, since releaseR is capped at 0.045 and grows at most 1.6x
+      // while falling -- see radiusAtFallTime). The old (0.030, 0.085)
+      // range had an unreachable top anchor, so even the largest droplet
+      // topped out around sizeT~0.76, and the pow(hash,2.6)-skewed size
+      // distribution meant most droplets sat near the range's near-flat
+      // bottom and showed no visible elongation at all.
+      float sizeT = smoothstep(0.022, 0.060, radiusP);
       vec2 dRaw = p - centerP;
-      float distP = length(dRaw);
-      if (distP >= radiusP * (1.0 + sizeT * 1.1)) return d; // cheap early-out using the loosest possible bound
-      vec2 dirUnit = distP > 1e-6 ? dRaw / distP : vec2(0.0, 1.0);
-      // Vertical-only stretch: +110% straight down (the falling direction
-      // -- screen-space y decreases as a droplet falls, so "down" is
-      // -dirUnit.y), tapers -32% straight up, and is EXACTLY zero at the
-      // sides (dirUnit.y == 0) so the droplet gets taller without also
-      // getting wider. A plain mix(-0.32, 1.1, smoothstep(-1,1,-dirUnit.y))
-      // does NOT hit zero at the sides -- it passes through the two
-      // endpoints' *average* there (~+0.39 with these constants), which
-      // reads as an unwanted horizontal bulge, worse the more the
-      // magnitude is increased. Summing two independent one-sided ramps
-      // (each pinned to 0 on its own inactive half) fixes that: both are
-      // exactly 0 at vertical==0, so only the top/bottom vary and the
-      // sides stay circular. Still fully smooth (each smoothstep has zero
-      // slope at its own boundary), still branchless.
-      float vertical = -dirUnit.y; // +1 straight down, -1 straight up, 0 at the sides
-      float stretchAmt = 1.1 * smoothstep(0.0, 1.0, max(0.0, vertical))
-                        - 0.32 * smoothstep(0.0, 1.0, max(0.0, -vertical));
-      float effRadius = radiusP * (1.0 + sizeT * stretchAmt);
-      if (distP >= effRadius) return d;
+      float yStretchFactor = 1.0 + sizeT * 0.85; // taller, straight scale -- always an ellipse, never non-convex
+      vec2 dShaped = vec2(dRaw.x, dRaw.y / yStretchFactor - sizeT * radiusP * 0.16); // small taper: narrower top, fuller bottom
+      float distP = length(dShaped);
+      if (distP >= radiusP) return d;
 
-      float t = clamp(distP / effRadius, 0.0, 1.0);
+      float t = clamp(distP / radiusP, 0.0, 1.0);
       float h = sqrt(max(0.0, 1.0 - t*t));
-      vec2 normalXY = dirUnit * t;
+      vec2 normalXY = dShaped / radiusP;
 
       // 1) Zoom/magnification — uniformly strong across the WHOLE droplet,
       //    including dead center: every point inside samples the
@@ -668,20 +660,24 @@ const glassMat = new THREE.ShaderMaterial({
       float zoom = mix(0.35, 0.55, hash1(centerP*173.0));
       vec2 zoomedUv = mix(centerUv, vUvIn, zoom);
       // 2) Edge bend — bulges outward toward the rim (hemisphere-normal
-      //    falloff), layered on top of the zoom. Scaled by effRadius, not
-      //    radiusP: this formula assumes t==1 (rim, where the offset is
-      //    largest) sits at distance radiusP from center, which is only
-      //    true for a circle. An elongated droplet's rim can be up to
-      //    2.1x radiusP away in the stretch direction, so using radiusP
-      //    here under-scales *where* the offset lands relative to how far
-      //    the pixel actually is -- confirmed directly: this was
-      //    increasing how often the background-sample coordinate
-      //    overshot [0,1] (the mechanism behind the seam fix above) by
-      //    ~1.5x versus the plain-circle shape, measured across 15
-      //    iPad-scale time samples on real WebKit. effRadius already
-      //    equals radiusP exactly for small/unstretched droplets, so this
-      //    is a no-op there.
-      vec2 edgeBend = normalXY * (1.0 - h) * effRadius * 1.3;
+      //    falloff), layered on top of the zoom. Deliberately still scaled
+      //    by the constant radiusP, not by how far the ellipse's rim
+      //    actually reaches in this direction. Tried scaling it up by the
+      //    true local reach first (matching how far the rim really is
+      //    when stretched) on the theory that using the constant radiusP
+      //    was under-scaling and letting bgUv drift further before the
+      //    fade catches it — measured the opposite: that made the
+      //    background-sample coordinate overshoot [0,1] *more* often
+      //    (2.24x vs. the plain-circle baseline, vs. 1.81x with radiusP
+      //    left alone), because it directly enlarges the offset itself on
+      //    top of an already-larger displacement from the pixel's own
+      //    position being farther from center. Elongation increases
+      //    overshoot somewhat regardless (~1.8x at this shape's current
+      //    strength, measured across 15 iPad-scale time samples on real
+      //    WebKit) simply because more pixels sit farther from center —
+      //    the fade band below is widened accordingly rather than chasing
+      //    this further.
+      vec2 edgeBend = normalXY * (1.0 - h) * radiusP * 1.3;
       d.uv = zoomedUv + vec2(edgeBend.x / planeAspect, edgeBend.y);
 
       // Tapers smoothly all the way to exactly 0 at t=1 (the droplet's own
@@ -947,13 +943,15 @@ const glassMat = new THREE.ShaderMaterial({
       // a soft return to the true background for the rare overshoot case.
       vec2 bgUv = coverUv(sampleUv, uPlaneAspect, uBgAspect);
       vec2 overshoot = max(vec2(0.0), max(-bgUv, bgUv - 1.0));
-      // Widened from 0.04: real-iPad retest still showed an occasional
-      // (much rarer than before, but visible) hard-ish edge -- the old
-      // width faded fully within a very short on-screen distance for
-      // large overshoots, which can still read as an edge even though
-      // it's technically smooth. A wider band spreads the same transition
-      // across more pixels.
-      float uvFade = 1.0 - smoothstep(0.0, 0.15, max(overshoot.x, overshoot.y));
+      // Widened twice: 0.04 -> 0.15 after a real-iPad retest still showed
+      // an occasional hard-ish edge (the old width faded fully within a
+      // very short on-screen distance for large overshoots, which can
+      // still read as an edge even though it's technically smooth); then
+      // 0.15 -> 0.24 after restoring elongation, which increases how
+      // often bgUv overshoots at all (~1.8x more overshoot pixels than an
+      // unstretched circle, measured on real WebKit) simply because more
+      // of an elongated droplet's own pixels sit farther from its center.
+      float uvFade = 1.0 - smoothstep(0.0, 0.24, max(overshoot.x, overshoot.y));
 
       // Only pay for the second (plain-background) sample on the rare
       // overshoot path — the vast majority of pixels have uvFade == 1 and
