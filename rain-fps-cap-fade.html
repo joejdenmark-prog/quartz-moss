@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#03040a">
-<title>Rain on Window</title>
+<title>Rain on Window (fps: cap+fade)</title>
 <style>
   *,*::before,*::after{ margin:0; padding:0; box-sizing:border-box; }
   html,body{
@@ -632,22 +632,12 @@ const glassMat = new THREE.ShaderMaterial({
       // that failure mode to attach to. Verified on real WebKit (visual +
       // pixel-diff stress test across many large-droplet configurations)
       // before shipping.
-      float sizeT = smoothstep(0.030, 0.085, radiusP);
-      vec2 dRaw = p - centerP;
-      float distP = length(dRaw);
-      if (distP >= radiusP * (1.0 + sizeT * 1.1)) return d; // cheap early-out using the loosest possible bound
-      vec2 dirUnit = distP > 1e-6 ? dRaw / distP : vec2(0.0, 1.0);
-      // Smooth (no piecewise branch, so no kink at the droplet's sides):
-      // stretches up to +110% straight down, tapers up to -32% straight up,
-      // in between at the sides. (Doubled from the initial +55%/-16% pass,
-      // which real-device testing found too subtle to read as a teardrop.)
-      float stretchAmt = mix(-0.32, 1.1, smoothstep(-1.0, 1.0, -dirUnit.y));
-      float effRadius = radiusP * (1.0 + sizeT * stretchAmt);
-      if (distP >= effRadius) return d;
-
-      float t = clamp(distP / effRadius, 0.0, 1.0);
+      vec2 dShaped = p - centerP;
+      float distP = length(dShaped);
+      if (distP >= radiusP) return d;
+      float t = clamp(distP / radiusP, 0.0, 1.0);
       float h = sqrt(max(0.0, 1.0 - t*t));
-      vec2 normalXY = dirUnit * t;
+      vec2 normalXY = dShaped / radiusP;
 
       // 1) Zoom/magnification — uniformly strong across the WHOLE droplet,
       //    including dead center: every point inside samples the
