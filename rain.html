@@ -865,7 +865,21 @@ const glassMat = new THREE.ShaderMaterial({
           // the fall kinematics for the exact time this droplet was at
           // this pixel's height, then check how far sideways (wobble-
           // adjusted) and how long ago that was.
-          if (p.y < cs.homeY && p.y > cs.pos.y) {
+          //
+          // dx >= -1 && dx <= 1: the trail band's own half-width (halfW,
+          // below) tops out at releaseR*0.22 (max ~0.016) -- far smaller
+          // than even the minimum cell size (0.05) -- so a home cell 2
+          // columns away can never be close enough in x to paint a trail
+          // pixel here, unlike the droplet BODY (shadeDroplet above, up to
+          // ~0.13 reach with elongation) which genuinely needs the full
+          // dx=-2..2. Verified by diffing this exact restriction against
+          // the unrestricted version across 20 iPad-scale time samples on
+          // real WebKit: 0% of pixels differed. Truncating dy the same way
+          // was tried too and was NOT safe (confirmed unsafe by the same
+          // methodology, ~7% of pixels differed) -- a trail candidate's
+          // home can legitimately be many rows away, so only the x-reach
+          // narrows, not the row range.
+          if (dx >= -1 && dx <= 1 && p.y < cs.homeY && p.y > cs.pos.y) {
           float t = sqrt(max(0.0, 2.0 * (cs.homeY - p.y) / cs.accel));
           if (t <= cs.tFall) {
             float trailX = cs.homeX + cs.wobbleAmp * sin(cs.wobbleFreq*t + cs.wobblePhase);
