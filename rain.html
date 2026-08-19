@@ -318,6 +318,12 @@ const SHARED_CELL_GLSL = `
       // droplet's on-screen lifetime -- see the trail block in main().
       float trailWobbleAmp, trailWobbleFreq, trailWobblePhase;
       float trailTFall;
+      // How long this cell's fall (current or most recently completed)
+      // actually takes start-to-exit. Combined with trailTFall, lets the
+      // occupancy pre-pass (see uOccPassMode in main()) recognize "trail
+      // still fading, even though the droplet itself already exited" as
+      // worth including, not just "currently, literally falling".
+      float fallDur;
     };
 
     // A released droplet's radius grows slowly as it falls — a cheap stand-in
@@ -434,6 +440,7 @@ const SHARED_CELL_GLSL = `
       cs.trailWobbleFreq = wobbleFreq;
       cs.trailWobblePhase = hash1(cell + fallCycleIndex*131.7 + 2.0) * 6.2831853;
       cs.trailTFall = rawT - (fallCycleIndex * cycleDur + growDur);
+      cs.fallDur = fallDur;
       return cs;
     }
 `;
@@ -828,6 +835,11 @@ const glassMat = new THREE.ShaderMaterial({
       return vis;
     }
 
+    // Hoisted to shader scope (was declared inside main(), after the
+    // occupancy pre-pass branch) so the pre-pass can also use it -- see
+    // the trailStillActive comment below.
+    const float TRAIL_FADE = 2.2;
+
     void main(){
       // Occupancy pre-pass mode: same program as the normal render below
       // (guaranteeing cellState() agrees with itself — see the comment on
@@ -839,8 +851,25 @@ const glassMat = new THREE.ShaderMaterial({
       if (uOccPassMode > 0.5) {
         vec2 occCell = floor(vUv * uOccGridDim) - vec2(2.0);
         CellState occCs = cellState(occCell, uCellSize, uTime);
-        float falling = (occCs.present && occCs.falling) ? 1.0 : 0.0;
-        gl_FragColor = vec4(falling, 0.0, 0.0, 1.0);
+        // Root cause of the trail-vanishes-on-respawn bug (found after the
+        // cellState()-level decoupling fix passed on desktop but failed on
+        // real iPad): this texture is the CHEAP GATE the main loop checks
+        // BEFORE ever reaching the trail code (see "cheap: not falling,
+        // skip the real check" below) -- it used to require occCs.falling
+        // literally true, so a cell that just respawned (falling=false,
+        // even though its trail should still be fading per trailTFall)
+        // got excluded here and the main loop's trail block never ran for
+        // it at all, regardless of what cellState() itself could compute.
+        // "overhang" is 0 or negative while genuinely falling (trailTFall
+        // is just tFall then, <= fallDur), and counts up from 0 starting
+        // the instant a cell exits/respawns (trailTFall keeps extrapolating
+        // past fallDur unclamped -- see cellState()) -- so this single
+        // condition covers both "actually falling" and "recently exited,
+        // trail still within its fade window" without needing a separate
+        // flag.
+        float overhang = occCs.trailTFall - occCs.fallDur;
+        bool relevant = occCs.present && (overhang < TRAIL_FADE);
+        gl_FragColor = vec4(relevant ? 1.0 : 0.0, 0.0, 0.0, 1.0);
         return;
       }
 
@@ -870,7 +899,6 @@ const glassMat = new THREE.ShaderMaterial({
       // the real cellState() (several hash/sin/sqrt calls) — most
       // candidates are absent or still growing and get skipped for the
       // price of one texture read.
-      const float TRAIL_FADE = 2.2;
       // Row-range multiplier dialed from 2.0x down to 1.5x -- a deliberate
       // fps/seam-frequency trade-off, not a correctness fix. 2.0x was the
       // smallest multiplier with ~0% measured pixel diff against an
@@ -925,6 +953,14 @@ const glassMat = new THREE.ShaderMaterial({
           // already answered.
           CellState cs = cellState(cell, uCellSize, uTime);
 
+          // Occupancy gate now also passes recently-exited cells (their
+          // trail may still be fading -- see uOccPassMode above), which
+          // are NOT falling. The body render below must stay gated on
+          // cs.falling specifically, or a just-respawned cell's sitting/
+          // growing body would render twice: once here, once from the
+          // sitting-loop search below (which already owns every growing
+          // droplet).
+          if (cs.falling) {
           Droplet dr = shadeDroplet(p, vUv, cs.pos, cs.radius, lightDir, uPlaneAspect);
           if (dr.hit) {
             float w = dr.w;
@@ -933,6 +969,7 @@ const glassMat = new THREE.ShaderMaterial({
             accumRim += dr.rim * w;
             accumAmbient += dr.ambient * w;
             accumDark += dr.dark * w;
+          }
           }
 
           // Trail: a thin, fading refractive smear along the path already
