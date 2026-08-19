@@ -301,11 +301,14 @@ const SHARED_CELL_GLSL = `
       return fract(sin(q)*43758.5453123);
     }
 
-    // Brief impact/splash phase, precedes grow -- see cellState() below
-    // and addSplashContribution() in the glass shader. Fixed duration
-    // (not hash-varied per cell): "quick" per the brief, and varying it
+    // Brief impact/splash phase, precedes falling directly (no grow phase
+    // -- see cellState() below and addSplashContribution() in the glass
+    // shader). Fixed duration (not hash-varied per cell): varying it
     // would only add complexity for a barely-perceptible difference.
-    const float SPLASH_DUR = 0.22;
+    // Widened from 0.22 to 0.65 after real-device feedback that the
+    // original felt like an abrupt flash rather than a splash with room
+    // to fade.
+    const float SPLASH_DUR = 0.65;
 
     struct CellState {
       bool present;
@@ -387,12 +390,14 @@ const SHARED_CELL_GLSL = `
       float exitY = -0.12; // a bit below the bottom edge
       float fallDist = max(centerP.y - exitY, 0.05); // each row falls its own distance to exit
       float accel = mix(0.05, 0.085, hash1(cell + 71.0));
-      float growDur = mix(7.0, 15.0, hash1(cell + 11.0));   // slow: "sit and grow"
       float fallDur = sqrt(2.0 * fallDist / accel);          // derived, so it lands exactly on exitY
-      // Phase boundaries within one cycle: [0,growStart) splash,
-      // [growStart,fallStart) grow, [fallStart,cycleDur) fall.
-      float growStart = SPLASH_DUR;
-      float fallStart = SPLASH_DUR + growDur;
+      // Phase boundaries within one cycle: [0,fallStart) splash,
+      // [fallStart,cycleDur) fall. No grow phase between them any more --
+      // per explicit request, a droplet forms at full release size right
+      // as the splash finishes and goes straight into falling, rather
+      // than sitting and slowly growing first. (growDur/"sit and grow"
+      // hash removed along with it -- no longer part of the cycle.)
+      float fallStart = SPLASH_DUR;
       float cycleDur = fallStart + fallDur;
       float phaseOffset = hash1(cell + 5.0) * 97.0;          // desyncs cells from each other
 
@@ -416,33 +421,28 @@ const SHARED_CELL_GLSL = `
       // gentle side-to-side drifts over a typical fall, not a rapid zigzag.
       float wobbleFreq = mix(0.9, 1.8, hash1(cell + 97.0));
 
-      if (cycleT < growStart) {
+      if (cycleT < fallStart) {
         // Impact/splash: the droplet has just hit the glass and hasn't
         // coalesced into a resting body yet -- see addSplashContribution
         // in the glass shader, which renders this phase entirely
-        // separately (a brief ring + a few tiny flung satellites), keyed
-        // off cs.splashT. No resting body here (radius 0): the point is
-        // to look like an impact, not an already-sitting droplet fading
-        // in.
+        // separately (a soft glow plus a few tiny flung satellites),
+        // keyed off cs.splashT. No resting body here (radius 0): the
+        // point is to look like an impact, not an already-sitting
+        // droplet fading in. The instant this phase ends, cs.falling
+        // below picks up at tFall=0, i.e. radiusAtFallTime(...,0) ==
+        // releaseR exactly -- full size immediately, no separate
+        // ramp-up.
         cs.splashing = true;
         cs.splashT = cycleT;
         cs.falling = false;
         cs.radius = 0.0;
         cs.pos = centerP;
-      } else if (cycleT < fallStart) {
-        // Sit and grow: stationary at its home cell, size ramping up from a
-        // small seed rather than popping in at full size. Wobble is never
-        // used while growing, so those hashes are skipped entirely here.
-        float growT = (cycleT - growStart) / growDur;
-        cs.falling = false;
-        cs.radius = releaseR * mix(0.12, 1.0, smoothstep(0.0, 1.0, growT));
-        cs.pos = centerP;
       } else {
         // Released: sliding down under acceleration, from its own home
         // position, with side-to-side wobble instead of a straight line.
         // Wobble phase re-rolls each cycle (cheap variety) without touching
-        // growDur/accel/releaseR, which must stay cell-constant for the
-        // closed-form fall math to stay self-consistent cycle to cycle.
+        // accel/releaseR, which must stay cell-constant for the closed-form
+        // fall math to stay self-consistent cycle to cycle.
         float wobblePhase = hash1(cell + cycleIndex*131.7 + 2.0) * 6.2831853;
 
         float tFall = cycleT - fallStart;
@@ -456,12 +456,11 @@ const SHARED_CELL_GLSL = `
 
       // Trail-only: always reference the most recently STARTED fall (this
       // cycle's if currently falling, the previous cycle's if currently
-      // splashing/growing/just respawned) and let it keep going past
-      // fallDur unclamped -- the same wobble/fall math as above, just
-      // never reset by the cycle wrap, so a trail keeps sliding and
-      // fading on its own timing (via the existing TRAIL_FADE window in
-      // main()) instead of vanishing the instant its droplet exits and
-      // respawns.
+      // splashing/just respawned) and let it keep going past fallDur
+      // unclamped -- the same wobble/fall math as above, just never reset
+      // by the cycle wrap, so a trail keeps sliding and fading on its own
+      // timing (via the existing TRAIL_FADE window in main()) instead of
+      // vanishing the instant its droplet exits and respawns.
       float fallCycleIndex = (cycleT >= fallStart) ? cycleIndex : (cycleIndex - 1.0);
       cs.trailWobbleAmp = wobbleAmp;
       cs.trailWobbleFreq = wobbleFreq;
@@ -826,20 +825,37 @@ const glassMat = new THREE.ShaderMaterial({
     ){
       float splashProgress = clamp(splashT / SPLASH_DUR, 0.0, 1.0);
 
+      // Single envelope drives BOTH opacity and size together, so the
+      // glow dims and shrinks in the same gradual motion rather than
+      // fading in place then cutting off. Quick pop-in (0-12% of
+      // SPLASH_DUR), then a long, smooth decay across the rest of the
+      // duration that reaches EXACTLY 0 at progress==1 -- guarantees zero
+      // weight right as the phase hands off to falling, so there's no
+      // visible pop at the transition either.
+      float appear = smoothstep(0.0, 0.12, splashProgress);
+      float decay = 1.0 - smoothstep(0.12, 1.0, splashProgress);
+      float envelope = appear * decay;
+
       // Flash: a soft, filled glow (smooth center-to-edge falloff, no
-      // ring/annulus) standing in for the brief flash of impact. A thin
-      // expanding RING was tried first and looked wrong: whatever's
-      // behind it varies (bright bokeh glow in some spots, a genuinely
-      // dark gap between blobs in others), so its silhouette read as a
-      // crisp, distinct dark-holed circle against dark backgrounds --
-      // visually "a drawn shape", not a flash. A filled radial gradient
-      // has no inner/outer edge to read as an outline, so it stays soft
-      // regardless of what's behind it.
-      float glowR = mix(releaseR*0.7, releaseR*1.15, smoothstep(0.0, 1.0, splashProgress));
+      // ring/annulus -- a thin expanding ring was tried and looked wrong,
+      // its silhouette read as a crisp dark-holed circle against dark
+      // backgrounds, "a drawn shape" not a flash) with an IRREGULAR,
+      // wobbled radius rather than a perfect circle -- real spatter isn't
+      // radially symmetric. The wobble is a couple of sine harmonics at
+      // different frequencies with per-cell random phase (cheap stand-in
+      // for real noise), evaluated in polar angle around the impact
+      // point. Bigger than the first pass (releaseR*2.0 vs *1.15 peak);
+      // reach with the wobble's own extra amplitude stays inside the
+      // sitting loop's 3x3 search window -- verified directly (not just
+      // computed) against a 5x5 comparison across many splash-active
+      // samples, see the commit message.
+      float angle = atan(p.y - centerP.y, p.x - centerP.x);
+      float wobble = 0.10 * sin(angle*3.0 + hash1(cell + 340.0)*6.2831853)
+                    + 0.07 * sin(angle*5.0 + hash1(cell + 350.0)*6.2831853);
+      float glowR = releaseR * 2.0 * envelope * (1.0 + wobble);
       float distFromCenter = length(p - centerP);
       float glowWeight = smoothstep(glowR, 0.0, distFromCenter);
-      float glowFade = 1.0 - smoothstep(0.3, 0.9, splashProgress);
-      float wGlow = glowWeight * glowFade * 0.3;
+      float wGlow = glowWeight * envelope * 0.32;
       if (wGlow > 0.001) {
         totalW += wGlow;
         accumUv += vUvIn * wGlow;
@@ -847,20 +863,24 @@ const glassMat = new THREE.ShaderMaterial({
       }
 
       // Satellite glints: tiny soft bright points, popping outward and
-      // vanishing well before the main droplet settles. Each of the 3
-      // gets its own per-cell hashed angle/speed/size jitter so a burst
-      // doesn't look perfectly symmetric.
+      // vanishing well before the splash phase ends. Each of the 3 gets
+      // its own per-cell hashed angle/speed/size jitter so a burst
+      // doesn't look perfectly symmetric. Same appear/decay envelope
+      // shape as the flash (quick pop-in, smooth fade to exactly 0 by
+      // progress==1), just with its own earlier-ending decay window so
+      // satellites are gone a bit before the main flash is.
+      float satDecay = 1.0 - smoothstep(0.12, 0.8, splashProgress);
+      float satEnvelope = appear * satDecay;
       for (int i = 0; i < 3; i++) {
         float fi = float(i);
-        float angle = hash1(cell + fi*13.7 + 200.0) * 6.2831853;
+        float satAngle = hash1(cell + fi*13.7 + 200.0) * 6.2831853;
         float speedJitter = mix(0.6, 1.0, hash1(cell + fi*7.3 + 210.0));
         float flingDist = releaseR * 2.0 * speedJitter * smoothstep(0.0, 1.0, splashProgress);
-        vec2 satPos = centerP + vec2(cos(angle), sin(angle)) * flingDist;
+        vec2 satPos = centerP + vec2(cos(satAngle), sin(satAngle)) * flingDist;
         float satR = releaseR * 0.22 * mix(0.7, 1.0, hash1(cell + fi*9.1 + 220.0));
-        float satFade = 1.0 - smoothstep(0.3, 0.85, splashProgress);
-        if (satFade <= 0.001) continue;
+        if (satEnvelope <= 0.001) continue;
         float distToSat = length(p - satPos);
-        float wSat = smoothstep(satR, 0.0, distToSat) * satFade * 0.4;
+        float wSat = smoothstep(satR, 0.0, distToSat) * satEnvelope * 0.4;
         if (wSat > 0.001) {
           totalW += wSat;
           accumUv += vUvIn * wSat;
