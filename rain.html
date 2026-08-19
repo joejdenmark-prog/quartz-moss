@@ -837,7 +837,20 @@ const glassMat = new THREE.ShaderMaterial({
       // candidates are absent or still growing and get skipped for the
       // price of one texture read.
       const float TRAIL_FADE = 2.2;
-      int maxDy = int(ceil(1.0 / uCellSize)) * 2 + 3;
+      // Row-range multiplier dialed from 2.0x down to 1.5x -- a deliberate
+      // fps/seam-frequency trade-off, not a correctness fix. 2.0x was the
+      // smallest multiplier with ~0% measured pixel diff against an
+      // exhaustive search; every smaller value re-admits the hard-edged
+      // seam artifact this range exists to prevent, just less often.
+      // Real-iPad calibration (this file's own three candidate points):
+      // 2.0x ~15fps/rare seam, 1.75x ~15.5-16.8fps/7-8 seams per 60s,
+      // 1.5x ~17-18fps/~5 seams per 60s -- chosen as an acceptable trade
+      // (1.75x actually measured MORE seams than 1.5x despite the smaller
+      // pixel-diff number, likely sample noise in a by-eye 60s count
+      // rather than a real reversal; worth another look if this dial is
+      // revisited). 1.0x (no widening at all) was the original, frequent-
+      // seam state this whole search-window sizing was built to fix.
+      int maxDy = int(ceil(1.0 / uCellSize) * 1.5) + 3;
       vec2 occTexel = vec2(1.0) / uOccGridDim;
 
       // dx narrowed from -2..2 to -1..1 (dy left at its full range above --
