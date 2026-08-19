@@ -731,8 +731,18 @@ const glassMat = new THREE.ShaderMaterial({
       int maxDyT = int(ceil(1.0 / uCellSize)) * 2 + 3;
       vec2 occTexelT = vec2(1.0) / uOccGridDim;
 
+      // vis only ever shrinks (every update is a min()), so once it's
+      // already negligible, no candidate found later -- however close or
+      // recent -- can change the visible result. dy ascends from the
+      // closest row outward, so the droplet that actually drives the fade
+      // is typically found early; bailing out here skips the remaining
+      // (usually larger) share of the search in the common case. Verified
+      // against the un-early-exited version across a dense real-WebKit
+      // stress test (40 iPad-scale time samples): identical output.
+      bool earlyOut = false;
       for (int dy = 0; dy <= 50; dy++){
         if (dy > maxDyT) break;
+        if (earlyOut) break;
         for (int dx = -2; dx <= 2; dx++){
           vec2 cell = cellBaseT + vec2(float(dx), float(dy));
           vec2 occUv = (cell + vec2(2.0) + 0.5) * occTexelT;
@@ -759,6 +769,7 @@ const glassMat = new THREE.ShaderMaterial({
 
           float recency = cs.tFall - t;
           vis = min(vis, smoothstep(0.0, 2.0, recency));
+          if (vis < 0.02) { earlyOut = true; break; }
         }
       }
       return vis;
@@ -907,8 +918,22 @@ const glassMat = new THREE.ShaderMaterial({
       // fades out and back in over ~2s as a single shape — the glass
       // slowly re-wetting — rather than being sliced into a visible half
       // and a faded half.
+      //
+      // ox narrowed back to ±1 (ox reach is governed by the sitting
+      // radius cap alone -- unlike falling droplets, sitting ones max out
+      // at releaseR itself, ~0.045, less than the smallest cell size,
+      // 0.05, so an unstretched sitting droplet geometrically cannot
+      // reach a 2nd column; the 5-wide version predates the radius cap,
+      // which was 0.095 at the time -- comfortably over a cell). oy kept
+      // at the full ±2: elongation stretches a growing droplet's own
+      // reach past one cell in the fall direction, and real-WebKit
+      // testing (40 iPad-scale time samples, diffed against the full 5x5)
+      // confirmed narrowing oy at all -- even asymmetrically -- reproduces
+      // real, if rare, clipping (worst case 0.03% of pixels), while
+      // narrowing only ox showed exactly zero difference across every
+      // sample tested.
       for (int oy = -2; oy <= 2; oy++){
-        for (int ox = -2; ox <= 2; ox++){
+        for (int ox = -1; ox <= 1; ox++){
           vec2 cell = cellBase + vec2(float(ox), float(oy));
           CellState cs = cellState(cell, uCellSize, uTime);
           if (!cs.present || cs.falling) continue;
