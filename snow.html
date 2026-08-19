@@ -323,17 +323,150 @@ tier2Mesh.instanceColor.needsUpdate = true;
 
 scene.add(trunkMesh, tier1Mesh, tier2Mesh);
 
+// ── Falling snow ──────────────────────────────────────────────────────────────
+// Every particle's position is a closed-form function of uTime (straight
+// fall + wraparound loop + a per-particle sine-based horizontal drift/
+// tumble), computed entirely in the vertex shader -- the CPU only ever
+// updates one uniform per frame, regardless of particle count. That's the
+// point of doing it this way rather than updating a position array in JS
+// each frame: a JS-side loop over thousands of particles every frame would
+// scale badly toward "blizzard" counts, while GPU-side per-vertex math for
+// even tens of thousands of points is trivial. One THREE.Points object, one
+// draw call for the entire snowfall regardless of density -- no per-pixel
+// search of any kind, unlike rain.html's droplets (which need the
+// occupancy-gate machinery specifically because they sample/bend the
+// background; these don't).
+const SNOW_COUNT = 3000; // <- the single density dial: light flurries to blizzard-thick, just change this
+// Sized to the camera's actual view cone, not just copied from the tree
+// field's width -- measured directly (via the real projection matrix)
+// that with the old values only ~13% of particles were ever inside the
+// frustum at a given moment: SNOW_Z_NEAR=20 put ~9% of particles behind
+// the camera entirely (it sits at z=9), and SNOW_X_HALF=95 was far wider
+// than the frustum ever needs even at the farthest used depth (measured
+// half-width there: ~28 in portrait). Narrowed to comfortably cover a
+// landscape-oriented view too (a wider aspect ratio needs a wider spread
+// than portrait does), rather than shrinking all the way to the
+// portrait-only minimum -- this is about not wasting most of the density
+// budget off-frustum, not about trimming as far as possible.
+const SNOW_X_HALF = 70;
+const SNOW_Z_NEAR = 8, SNOW_Z_FAR = -100; // near bound just in front of the camera (was 20, behind it) -- some snow still drifts close to the lens, none wasted spawning where it can never be seen
+const SNOW_Y_TOP = 34, SNOW_Y_BOTTOM = -3; // falls from above the frame down past ground level, then loops -- no landing/accumulation yet, that's a later stage
+
+const snowGeo = new THREE.BufferGeometry();
+// "position" here is a fixed per-particle ANCHOR (x/z spawn column, y
+// unused/zeroed), not the live falling position -- the actual Y each frame
+// is computed in the shader from uTime, never written back to this array.
+const anchors  = new Float32Array(SNOW_COUNT * 3);
+const fallInfo = new Float32Array(SNOW_COUNT * 2); // x: fall speed, y: time-phase offset (desyncs particles so they don't all fall in lockstep)
+const drift    = new Float32Array(SNOW_COUNT * 4); // x: drift amp (X axis), y: drift freq, z: drift phase, w: drift amp (Z axis)
+const sizes    = new Float32Array(SNOW_COUNT);
+
+for (let i = 0; i < SNOW_COUNT; i++) {
+  anchors[i*3+0] = range(-SNOW_X_HALF, SNOW_X_HALF);
+  anchors[i*3+1] = 0;
+  anchors[i*3+2] = range(SNOW_Z_FAR, SNOW_Z_NEAR);
+
+  fallInfo[i*2+0] = range(2.2, 4.2);
+  fallInfo[i*2+1] = range(0, 1000);
+
+  drift[i*4+0] = range(0.3, 1.1);
+  drift[i*4+1] = range(0.15, 0.45);
+  drift[i*4+2] = range(0, Math.PI * 2);
+  drift[i*4+3] = range(0.2, 0.7);
+
+  sizes[i] = range(2.0, 5.0);
+}
+snowGeo.setAttribute('position', new THREE.BufferAttribute(anchors, 3));
+snowGeo.setAttribute('aFall', new THREE.BufferAttribute(fallInfo, 2));
+snowGeo.setAttribute('aDrift', new THREE.BufferAttribute(drift, 4));
+snowGeo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+
+const snowMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uYTop: { value: SNOW_Y_TOP },
+    uYBottom: { value: SNOW_Y_BOTTOM },
+    uPixelRatio: { value: renderer.getPixelRatio() },
+    uFogColor: { value: new THREE.Color(SKY_COLOR) },
+    uFogNear: { value: scene.fog.near },
+    uFogFar: { value: scene.fog.far },
+  },
+  transparent: true,
+  depthWrite: false, // standard for soft transparent sprites -- avoids z-fighting/sorting artifacts between overlapping flakes, while depthTest (left on, default) still lets trees correctly occlude snow behind them
+  vertexShader: `
+    attribute vec2 aFall;
+    attribute vec4 aDrift;
+    attribute float aSize;
+    uniform float uTime, uYTop, uYBottom, uPixelRatio;
+    varying float vFogDepth;
+    varying float vAlpha;
+    void main(){
+      float span = uYTop - uYBottom;
+      float fallT = mod(uTime * aFall.x + aFall.y, span);
+      float y = uYTop - fallT;
+
+      // Gentle wind-blown wander rather than a straight drop -- two offset
+      // sine waves (X and Z, different frequency/phase) trace a slow
+      // lissajous-style curve as the flake falls, read as "tumbling"
+      // rather than sliding on rails.
+      float driftX = sin(uTime * aDrift.y + aDrift.z) * aDrift.x;
+      float driftZ = cos(uTime * aDrift.y * 0.8 + aDrift.z * 1.3) * aDrift.w;
+
+      vec3 pos = vec3(position.x + driftX, y, position.z + driftZ);
+      vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+      gl_Position = projectionMatrix * mvPosition;
+
+      float dist = -mvPosition.z;
+      gl_PointSize = clamp(aSize * uPixelRatio * (50.0 / max(dist, 3.0)), 1.0, 40.0);
+      vFogDepth = dist;
+
+      // Fade in/out right at the top/bottom of the fall span so a particle
+      // never visibly pops into existence mid-air or vanishes abruptly at
+      // the wrap point -- smoothed over a small fraction of the span.
+      float edge = span * 0.06;
+      vAlpha = smoothstep(0.0, edge, fallT) * (1.0 - smoothstep(span - edge, span, fallT));
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uFogColor; uniform float uFogNear, uFogFar;
+    varying float vFogDepth; varying float vAlpha;
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+      float d = length(uv) * 2.0;
+      float shape = smoothstep(1.0, 0.35, d); // soft round sprite, no texture needed
+      if (shape < 0.01) discard;
+      float fog = smoothstep(uFogNear, uFogFar, vFogDepth);
+      vec3 col = mix(vec3(1.0), uFogColor, fog * 0.7); // distant flakes cool/pale toward the fog color, same cue the trees get
+      float alpha = shape * vAlpha * (1.0 - fog * 0.85);
+      gl_FragColor = vec4(col, alpha);
+    }
+  `,
+});
+const snow = new THREE.Points(snowGeo, snowMat);
+// The geometry's own bounding sphere is computed from the static anchor
+// positions (y=0 for all of them), which doesn't reflect the actual
+// y:[uYBottom,uYTop] range the shader moves particles through -- automatic
+// frustum culling would use that stale bounding sphere and could cull the
+// whole snowfall incorrectly. Positions are cheap to compute either way, so
+// just render it unconditionally rather than trying to keep a manual
+// bounding volume in sync.
+snow.frustumCulled = false;
+scene.add(snow);
+
 // ── FPS readout ───────────────────────────────────────────────────────────────
 const fpsEl = document.getElementById('fps');
 let fpsFrames = 0, fpsAccum = 0;
 
 // ── Render loop ───────────────────────────────────────────────────────────────
-// dt is computed and available for the next stages (snowfall, any gentle
-// idle motion) but nothing in this static-environment stage actually
-// consumes it yet beyond the fps readout itself.
+// simTime accumulates from the same clamped dt used for fps, matching the
+// pattern in rain.html/lava.html -- drives the snow shader's uTime, the
+// only thing in the scene that currently animates.
 const clock = new THREE.Clock();
+let simTime = 0;
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
+  simTime += dt;
+  snowMat.uniforms.uTime.value = simTime;
 
   renderer.render(scene, camera);
 
@@ -345,7 +478,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future work ───────────────────────────────────────────
-window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, tier1Mesh, tier2Mesh, treePlacements };
+window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, tier1Mesh, tier2Mesh, treePlacements, snow, snowMat, SNOW_COUNT };
 </script>
 </body>
 </html>
