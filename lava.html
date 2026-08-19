@@ -22,12 +22,6 @@
     background:radial-gradient(ellipse 100% 90% at 50% 45%,
       transparent 45%, rgba(0,0,0,0.35) 78%, rgba(0,0,0,0.72) 100%);
   }
-  #fps{
-    position:fixed; top:8px; left:8px; z-index:9999;
-    font:12px/1.4 monospace; color:#ff8a4a;
-    background:rgba(10,4,2,0.55); padding:4px 8px; border-radius:4px;
-    pointer-events:none; white-space:pre;
-  }
   #reset-btn{
     position:fixed; bottom:24px; right:24px; width:46px; height:46px;
     border-radius:50%;
@@ -44,30 +38,12 @@
   }
   #reset-btn:hover  { opacity:1; }
   #reset-btn:active { transform:scale(.9); opacity:1; }
-  #mute-btn{
-    position:fixed; top:12px; right:12px; width:38px; height:38px;
-    border-radius:50%;
-    border:1px solid rgba(255,110,60,0.35);
-    background:rgba(20,6,4,0.72);
-    color:rgba(255,140,90,0.9);
-    font-size:16px; line-height:1;
-    display:flex; align-items:center; justify-content:center;
-    cursor:pointer;
-    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
-    transition:opacity .25s ease, transform .14s ease;
-    opacity:.6; z-index:100; user-select:none;
-    -webkit-tap-highlight-color:transparent; touch-action:manipulation;
-  }
-  #mute-btn:hover  { opacity:1; }
-  #mute-btn:active { transform:scale(.9); opacity:1; }
 </style>
 </head>
 <body>
 <canvas id="canvas"></canvas>
 <div id="vignette"></div>
-<div id="fps">-- fps</div>
 <button id="reset-btn" title="Reset">↺</button>
-<button id="mute-btn" title="Mute">🔊</button>
 
 <script type="importmap">
 { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
@@ -2231,7 +2207,6 @@ const LOOP_SILENCE_THRESH = 0.005; // ~-46dB "is there real content here" floor
 const LOOP_CROSSFADE_S = 0.12;     // 120ms crossfade at the (trimmed) loop point
 let audioCtx = null, audioGain = null, audioBuffer = null;
 let audioMuted = false, audioStarted = false;
-const muteBtn = document.getElementById('mute-btn');
 
 function findAudibleBounds(buffer){
   const ch = buffer.getChannelData(0);
@@ -2412,20 +2387,8 @@ window.addEventListener('pointerdown', () => {
   else if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
 }, { once: true, passive: true });
 
-muteBtn.addEventListener('click', () => {
-  audioMuted = !audioMuted;
-  if (audioGain) audioGain.gain.value = audioMuted ? 0 : AMBIENT_VOLUME;
-  if (crackFillGain) crackFillGain.gain.value = audioMuted ? 0 : CRACK_FILL_VOLUME;
-  muteBtn.textContent = audioMuted ? '🔇' : '🔊';
-  muteBtn.title = audioMuted ? 'Unmute' : 'Mute';
-});
-
 // ── Initial ambient bubbles ───────────────────────────────────────────────────
 for (let i = 0; i < 4; i++) trySpawnBubble();
-
-// ── FPS readout ───────────────────────────────────────────────────────────────
-const fpsEl = document.getElementById('fps');
-let fpsFrames = 0, fpsAccum = 0;
 
 // ── Render loop ───────────────────────────────────────────────────────────────
 const clock = new THREE.Clock();
@@ -2448,12 +2411,6 @@ renderer.setAnimationLoop(() => {
   updateBurst(dt);
 
   renderer.render(scene, camera);
-
-  fpsFrames++; fpsAccum += dt;
-  if (fpsAccum >= 0.5) {
-    fpsEl.textContent = `${(fpsFrames/fpsAccum).toFixed(1)} fps`;
-    fpsFrames = 0; fpsAccum = 0;
-  }
 });
 
 // ── Console handle for future animation work ─────────────────────────────────
