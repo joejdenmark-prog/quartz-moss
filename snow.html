@@ -176,7 +176,82 @@ const SNOW_SHADE = new THREE.Color(0xc7d6dc); // cooler/darker, pools in the und
   groundGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   groundGeo.computeVertexNormals(); // required after manually displacing Y — lighting would otherwise use the flat pre-displacement normals
 }
-const groundMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0.0 });
+
+// Fine grain + sparkle, layered on top of the vertex-color undulation
+// shading above via ordinary texture maps rather than a custom shader --
+// standard MeshStandardMaterial multiplies vertexColors x map together
+// automatically, so this composites correctly with the existing lighting/
+// fog for free, no shader surgery needed. Both textures are generated once
+// at load time onto an offscreen canvas (no external image assets, same
+// "everything procedural, no build step" approach as the rest of the
+// file) and tiled via RepeatWrapping, so texel detail doesn't depend on
+// the ground mesh's own (fairly coarse) vertex density the way vertex
+// colors did.
+function clampByte(v){ return Math.max(0, Math.min(255, v | 0)); }
+
+// Small, low-contrast per-pixel luminance jitter -- reads as grain/texture
+// up close rather than the perfectly flat white the ground had before.
+function makeSnowGrainTexture(size){
+  const cnv = document.createElement('canvas');
+  cnv.width = cnv.height = size;
+  const ctx = cnv.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const n = (rng() - 0.5) * 30; // +-15 luminance jitter, subtle
+    d[i]   = clampByte(255 + n);
+    d[i+1] = clampByte(255 + n);
+    d[i+2] = clampByte(255 + n * 0.92); // fractionally cooler in the dark specks than the light ones
+    d[i+3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(cnv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// Sparse bright dots on black, used as an emissive map -- a handful of
+// "crystals" that stay bright regardless of the soft overcast lighting,
+// standing in for snow catching the light. The camera never moves in this
+// scene, so a fixed pattern reads the same as true view-dependent glinting
+// would from this one fixed angle, without needing custom specular shader
+// code to get there.
+function makeSparkleTexture(size, dotCount){
+  const cnv = document.createElement('canvas');
+  cnv.width = cnv.height = size;
+  const ctx = cnv.getContext('2d');
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = '#ffffff';
+  for (let i = 0; i < dotCount; i++) {
+    const x = rng() * size, y = rng() * size;
+    const r = range(0.5, 1.3);
+    ctx.globalAlpha = range(0.35, 1.0);
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  const tex = new THREE.CanvasTexture(cnv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+const grainTex = makeSnowGrainTexture(256);
+grainTex.repeat.set(50, 28); // tiled fine enough to read as grain rather than visible large tiles, across the 400x220 ground
+const sparkleTex = makeSparkleTexture(512, 260);
+sparkleTex.repeat.set(16, 9); // coarser repeat than the grain -- keeps individual sparkle dots looking sparse/soft rather than a dense regular-looking speckle
+
+const groundMat = new THREE.MeshStandardMaterial({
+  vertexColors: true,
+  roughness: 0.92,
+  metalness: 0.0,
+  map: grainTex,
+  emissive: 0xffffff,
+  emissiveMap: sparkleTex,
+  emissiveIntensity: 0.28, // soft -- individual glints, not a glowing surface
+});
 const ground = new THREE.Mesh(groundGeo, groundMat);
 scene.add(ground);
 
@@ -350,7 +425,14 @@ const SNOW_COUNT = 3000; // <- the single density dial: light flurries to blizza
 // budget off-frustum, not about trimming as far as possible.
 const SNOW_X_HALF = 70;
 const SNOW_Z_NEAR = 8, SNOW_Z_FAR = -100; // near bound just in front of the camera (was 20, behind it) -- some snow still drifts close to the lens, none wasted spawning where it can never be seen
-const SNOW_Y_TOP = 34, SNOW_Y_BOTTOM = -3; // falls from above the frame down past ground level, then loops -- no landing/accumulation yet, that's a later stage
+// -2 (was -3) is just a loop floor for the time-wraparound math below, not
+// where flakes actually vanish any more -- see uGroundHeight in the vertex
+// shader, which fades each flake out right at the REAL (undulating)
+// ground surface instead. Tightened slightly since flakes now go invisible
+// well before reaching this floor anyway (the ground's lowest point is
+// ~-1.18); a much deeper floor would just mean more of each particle's
+// cycle spent invisible underground before it loops back to the top.
+const SNOW_Y_TOP = 34, SNOW_Y_BOTTOM = -2;
 
 const snowGeo = new THREE.BufferGeometry();
 // "position" here is a fixed per-particle ANCHOR (x/z spawn column, y
@@ -400,6 +482,20 @@ const snowMat = new THREE.ShaderMaterial({
     uniform float uTime, uYTop, uYBottom, uPixelRatio;
     varying float vFogDepth;
     varying float vAlpha;
+
+    // Exactly mirrors the ground plane's own displacement formula (see the
+    // JS that builds groundGeo) -- so "the ground surface at this x/z" is
+    // known here in closed form too, without needing to read back the
+    // actual mesh. Keeping the two in sync is why this is a literal copy
+    // rather than an approximation.
+    float groundHeight(vec2 xz){
+      float x = xz.x, z = xz.y;
+      return sin(x*0.035 + 1.0) * 0.35
+           + sin(z*0.045 + 2.4) * 0.40
+           + sin((x+z)*0.021 + 0.7) * 0.50
+           + sin((x-z)*0.013 + 3.1) * 0.30;
+    }
+
     void main(){
       float span = uYTop - uYBottom;
       float fallT = mod(uTime * aFall.x + aFall.y, span);
@@ -411,8 +507,26 @@ const snowMat = new THREE.ShaderMaterial({
       // rather than sliding on rails.
       float driftX = sin(uTime * aDrift.y + aDrift.z) * aDrift.x;
       float driftZ = cos(uTime * aDrift.y * 0.8 + aDrift.z * 1.3) * aDrift.w;
+      float worldX = position.x + driftX, worldZ = position.z + driftZ;
 
-      vec3 pos = vec3(position.x + driftX, y, position.z + driftZ);
+      // How far this flake sits above the REAL (undulating) ground surface
+      // directly below its current (drifted) x/z -- not the fixed loop
+      // floor. Fades out smoothly over the last little bit of the approach
+      // rather than popping, and reaches exactly 0 once it reaches the
+      // surface, so it visibly settles onto the ground instead of phasing
+      // through it. No accumulation/depth change -- the ground itself
+      // never moves, this only ever hides the flake; the same particle
+      // budget just keeps recycling from the top once fallT wraps.
+      float groundY = groundHeight(vec2(worldX, worldZ));
+      float aboveGround = y - groundY;
+      float landFade = smoothstep(0.0, 0.6, aboveGround);
+      // Once landed, keep the point pinned right at the surface rather
+      // than letting it keep sinking (invisibly) toward uYBottom -- purely
+      // cosmetic since alpha is already 0 there, just avoids rendering a
+      // fully-transparent point far below the ground for no reason.
+      y = max(y, groundY);
+
+      vec3 pos = vec3(worldX, y, worldZ);
       vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
       gl_Position = projectionMatrix * mvPosition;
 
@@ -420,11 +534,10 @@ const snowMat = new THREE.ShaderMaterial({
       gl_PointSize = clamp(aSize * uPixelRatio * (50.0 / max(dist, 3.0)), 1.0, 40.0);
       vFogDepth = dist;
 
-      // Fade in/out right at the top/bottom of the fall span so a particle
-      // never visibly pops into existence mid-air or vanishes abruptly at
-      // the wrap point -- smoothed over a small fraction of the span.
-      float edge = span * 0.06;
-      vAlpha = smoothstep(0.0, edge, fallT) * (1.0 - smoothstep(span - edge, span, fallT));
+      // Fade in at the top of the fall span so a particle never visibly
+      // pops into existence mid-air right after respawning.
+      float fadeIn = smoothstep(0.0, span * 0.06, fallT);
+      vAlpha = fadeIn * landFade;
     }
   `,
   fragmentShader: `
