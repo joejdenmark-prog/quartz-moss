@@ -311,6 +311,13 @@ const SHARED_CELL_GLSL = `
       float accel;
       float wobbleAmp, wobbleFreq, wobblePhase;
       float tFall;
+      // Trail-only fields: always describe the MOST RECENTLY STARTED fall
+      // (this cycle's, if currently falling; the previous cycle's,
+      // otherwise), continuing that fall's kinematics unclamped past
+      // fallDur/exitY. Decouples the trail's own visibility from the
+      // droplet's on-screen lifetime -- see the trail block in main().
+      float trailWobbleAmp, trailWobbleFreq, trailWobblePhase;
+      float trailTFall;
     };
 
     // A released droplet's radius grows slowly as it falls — a cheap stand-in
@@ -363,11 +370,25 @@ const SHARED_CELL_GLSL = `
       float cycleDur = growDur + fallDur;
       float phaseOffset = hash1(cell + 5.0) * 97.0;          // desyncs cells from each other
 
-      float cycleT = mod(uTimeIn + phaseOffset, cycleDur);
+      // rawT/cycleIndex computed explicitly (rather than a single mod())
+      // because the trail fields below need cycleIndex regardless of
+      // which phase the cell is CURRENTLY in.
+      float rawT = uTimeIn + phaseOffset;
+      float cycleIndex = floor(rawT / cycleDur);
+      float cycleT = rawT - cycleIndex * cycleDur;
 
       cs.present = true;
       cs.homeX = centerP.x; cs.homeY = centerP.y; cs.releaseR = releaseR; cs.accel = accel;
       cs.wobbleAmp = 0.0; cs.wobbleFreq = 0.0; cs.wobblePhase = 0.0;
+
+      // wobbleAmp/wobbleFreq only ever depend on cell (not cycleIndex),
+      // so they're the same every cycle -- computed once here and reused
+      // by both the current-state branch below and the trail fields,
+      // rather than recomputing inside the falling branch as before.
+      float wobbleAmp = mix(0.004, 0.014, hash1(cell + 83.0));
+      // Radians per second directly (not cycles-per-second) — roughly 1-2
+      // gentle side-to-side drifts over a typical fall, not a rapid zigzag.
+      float wobbleFreq = mix(0.9, 1.8, hash1(cell + 97.0));
 
       if (cycleT < growDur) {
         // Sit and grow: stationary at its home cell, size ramping up from a
@@ -383,12 +404,7 @@ const SHARED_CELL_GLSL = `
         // Wobble phase re-rolls each cycle (cheap variety) without touching
         // growDur/accel/releaseR, which must stay cell-constant for the
         // closed-form fall math to stay self-consistent cycle to cycle.
-        float cycleIndex = floor((uTimeIn + phaseOffset) / cycleDur);
         float wobblePhase = hash1(cell + cycleIndex*131.7 + 2.0) * 6.2831853;
-        float wobbleAmp = mix(0.004, 0.014, hash1(cell + 83.0));
-        // Radians per second directly (not cycles-per-second) — roughly 1-2
-        // gentle side-to-side drifts over a typical fall, not a rapid zigzag.
-        float wobbleFreq = mix(0.9, 1.8, hash1(cell + 97.0));
 
         float tFall = cycleT - growDur;
         float fallenDist = 0.5 * accel * tFall * tFall;
@@ -398,6 +414,20 @@ const SHARED_CELL_GLSL = `
         cs.pos = vec2(centerP.x + wobbleAmp * sin(wobbleFreq*tFall + wobblePhase), centerP.y - fallenDist);
         cs.radius = radiusAtFallTime(releaseR, accel, tFall);
       }
+
+      // Trail-only: always reference the most recently STARTED fall (this
+      // cycle's if currently falling, the previous cycle's if currently
+      // growing/just respawned) and let it keep going past fallDur
+      // unclamped -- the same wobble/fall math as above, just never reset
+      // by the cycle wrap, so a trail keeps sliding and fading on its own
+      // timing (via the existing TRAIL_FADE window in main()) instead of
+      // vanishing the instant its droplet exits and respawns.
+      float fallCycleIndex = (cycleT >= growDur) ? cycleIndex : (cycleIndex - 1.0);
+      cs.trailWobbleAmp = wobbleAmp;
+      cs.trailWobbleFreq = wobbleFreq;
+      cs.trailWobblePhase = hash1(cell + fallCycleIndex*131.7 + 2.0) * 6.2831853;
+      cs.trailTFall = rawT - (fallCycleIndex * cycleDur + growDur);
+
       return cs;
     }
 `;
@@ -910,11 +940,22 @@ const glassMat = new THREE.ShaderMaterial({
           // releaseR*0.22 (max ~0.016), far smaller than even the minimum
           // cell size, so it was never going to need more x-reach than the
           // body's own dx=-1..1 above provides.
-          if (p.y < cs.homeY && p.y > cs.pos.y) {
+          //
+          // Uses cs.trailTFall/trailWobble* (see cellState) instead of
+          // cs.tFall/wobble*: those track the droplet's OWN current phase,
+          // which resets to 0 the instant it reaches exitY and respawns —
+          // the trail would vanish mid-fade at that exact moment, which
+          // read as unnatural (reported directly: "trail disappears
+          // instantly along with it"). The trail fields keep extrapolating
+          // the same fall kinematics unclamped past that point, so the
+          // streak keeps sliding and fading on its own timing regardless
+          // of what the droplet that made it is doing now.
+          float trailPosY = cs.homeY - 0.5 * cs.accel * max(0.0, cs.trailTFall) * max(0.0, cs.trailTFall);
+          if (p.y < cs.homeY && p.y > trailPosY) {
           float t = sqrt(max(0.0, 2.0 * (cs.homeY - p.y) / cs.accel));
-          if (t <= cs.tFall) {
-            float trailX = cs.homeX + cs.wobbleAmp * sin(cs.wobbleFreq*t + cs.wobblePhase);
-            float recency = cs.tFall - t;
+          if (t <= cs.trailTFall) {
+            float trailX = cs.homeX + cs.trailWobbleAmp * sin(cs.trailWobbleFreq*t + cs.trailWobblePhase);
+            float recency = cs.trailTFall - t;
             float fade = 1.0 - smoothstep(0.0, TRAIL_FADE, recency);
             float radiusAtT = radiusAtFallTime(cs.releaseR, cs.accel, t);
             float dxT = abs(p.x - trailX);
