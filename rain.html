@@ -342,8 +342,12 @@ const SHARED_CELL_GLSL = `
       // Tested in isolation (rain-density-test.html) alongside the tighter
       // radius cap below: real device gain, though more modest than a
       // straight 20% would suggest (fill-rate wasn't the dominant cost).
+      // Lowered further to 0.2 (from 0.4) purely for look/feel -- half as
+      // many droplets again on top of the earlier fps-motivated cut, after
+      // real-device viewing confirmed a noticeably calmer, sparser scene
+      // was wanted over a performance target.
       float presence = hash1(cell);
-      if (presence > 0.4) return cs; // ~40% of cells actually hold a droplet
+      if (presence > 0.2) return cs; // ~20% of cells actually hold a droplet
 
       vec2 jitter = hash2(cell + 17.0) - 0.5;
       vec2 centerP = (cell + 0.5 + jitter*0.85) * cellSize;
@@ -360,7 +364,10 @@ const SHARED_CELL_GLSL = `
       // removed entirely rather than merely shrunk, since sizeHash's own
       // distribution (pow(hash,2.6), skewed toward small values) is
       // unchanged.
-      float releaseR = mix(0.020, 0.035, sizeHash);
+      // Both ends lowered again (0.020->0.014, 0.035->0.026) to eliminate
+      // large/dominant droplets entirely while keeping a small-to-medium
+      // size spread rather than flattening everything to one uniform size.
+      float releaseR = mix(0.014, 0.026, sizeHash);
 
       float exitY = -0.12; // a bit below the bottom edge
       float fallDist = max(centerP.y - exitY, 0.05); // each row falls its own distance to exit
@@ -427,7 +434,6 @@ const SHARED_CELL_GLSL = `
       cs.trailWobbleFreq = wobbleFreq;
       cs.trailWobblePhase = hash1(cell + fallCycleIndex*131.7 + 2.0) * 6.2831853;
       cs.trailTFall = rawT - (fallCycleIndex * cycleDur + growDur);
-
       return cs;
     }
 `;
@@ -673,14 +679,12 @@ const glassMat = new THREE.ShaderMaterial({
       // of an existing vector before it feeds length()/normalize(), which
       // is the specific pattern that was implicated (never root-caused)
       // in that earlier artifact.
-      // Retuned for the current post-cap radius range (max radiusP is now
-      // ~0.056, since releaseR is capped at 0.035 and grows at most 1.6x
-      // while falling -- see radiusAtFallTime). The old (0.030, 0.085)
-      // range had an unreachable top anchor, so even the largest droplet
-      // topped out around sizeT~0.76, and the pow(hash,2.6)-skewed size
-      // distribution meant most droplets sat near the range's near-flat
-      // bottom and showed no visible elongation at all.
-      float sizeT = smoothstep(0.022, 0.056, radiusP);
+      // Retuned again to match the new, smaller max radiusP (~0.042,
+      // since releaseR is now capped at 0.026 and grows at most 1.6x
+      // while falling). Scaled proportionally from the prior (0.022,
+      // 0.056) calibration so the largest droplets in this new, smaller
+      // size range still reach full elongation strength.
+      float sizeT = smoothstep(0.016, 0.042, radiusP);
       vec2 dRaw = p - centerP;
       float yStretchFactor = 1.0 + sizeT * 0.85; // taller, straight scale -- always an ellipse, never non-convex
       vec2 dShaped = vec2(dRaw.x, dRaw.y / yStretchFactor - sizeT * radiusP * 0.16); // small taper: narrower top, fuller bottom
