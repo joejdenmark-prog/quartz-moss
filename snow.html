@@ -94,8 +94,11 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(SKY_COLOR);
 // Light and airy per the brief, not a heavy near-in fog: starts well past
 // the midground so close/mid trees stay crisp, and only softly dissolves
-// the far edge of the forest into the sky color.
-scene.fog = new THREE.Fog(SKY_COLOR, 70, 205);
+// the far edge of the forest into the sky color. Distances pulled in to
+// match the tree field being pulled closer (was 70/205) -- otherwise the
+// far edge of the now-nearer forest would sit well short of the old fog
+// start and lose the "receding into haze" depth cue entirely.
+scene.fog = new THREE.Fog(SKY_COLOR, 45, 125);
 
 // Perspective, not orthographic — "viewed from a fixed camera angle" reads
 // as standing at the edge of a clearing looking in, which needs a real
@@ -239,8 +242,13 @@ const tier2Mesh = new THREE.InstancedMesh(tier2Geo, canopyMat, TREE_COUNT);
 // O(n^2)-ish placement pass well under a millisecond, so no need for a
 // spatial index here.
 const FIELD_HALF_X = 90;
-const FIELD_Z_NEAR = 3;   // closest a tree may spawn to the camera
-const FIELD_Z_FAR  = -175; // furthest into the fog
+// Both bounds pulled in noticeably (was 3 / -175) so the same tree count
+// packs into a smaller volume -- brings the nearest trees close enough to
+// feel present/immersive rather than sitting in the mid-distance, and
+// raises overall density (not just the boundary) since the same 360 trees
+// now fill less depth.
+const FIELD_Z_NEAR = 6;    // closest a tree may spawn to the camera
+const FIELD_Z_FAR  = -100; // furthest into the fog
 const MIN_SPACING  = 2.6;
 function scatterTrees(count){
   const placements = [];
@@ -251,8 +259,11 @@ function scatterTrees(count){
     const x = range(-FIELD_HALF_X, FIELD_HALF_X);
     const z = range(FIELD_Z_FAR, FIELD_Z_NEAR);
     // Keep a small gap directly ahead of the camera so the view isn't
-    // immediately blocked by a trunk right at the lens.
-    if (Math.abs(x) < 2.5 && z > FIELD_Z_NEAR - 7) continue;
+    // immediately blocked by a trunk right at the lens. Narrowed along
+    // with the closer near bound (was 2.5/7) so this doesn't end up
+    // excluding most of the newly-close range -- just enough to keep the
+    // lens itself clear.
+    if (Math.abs(x) < 1.6 && z > FIELD_Z_NEAR - 3.5) continue;
     let ok = true;
     for (let i = 0; i < placements.length; i++) {
       const dx = placements[i].x - x, dz = placements[i].z - z;
@@ -263,6 +274,12 @@ function scatterTrees(count){
   return placements;
 }
 const treePlacements = scatterTrees(TREE_COUNT);
+
+// Applied as an instance-transform stretch (Y only, not X/Z) rather than a
+// geometry change -- taller trunk+canopy together, without proportionally
+// widening the canopy too, which reads as more looming/immersive rather
+// than just "the same tree but bigger".
+const HEIGHT_MULT = 1.65;
 
 const dummy = new THREE.Object3D();
 const tint = new THREE.Color();
@@ -276,7 +293,7 @@ for (let i = 0; i < treePlacements.length; i++) {
 
   dummy.position.set(x, 0, z);
   dummy.rotation.set(0, rotY, 0);
-  dummy.scale.setScalar(scale);
+  dummy.scale.set(scale, scale * HEIGHT_MULT, scale);
   dummy.updateMatrix();
 
   // Trunk and both canopy tiers share this exact matrix -- their relative
