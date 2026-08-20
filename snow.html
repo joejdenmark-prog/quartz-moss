@@ -177,16 +177,18 @@ const SNOW_SHADE = new THREE.Color(0xc7d6dc); // cooler/darker, pools in the und
   groundGeo.computeVertexNormals(); // required after manually displacing Y — lighting would otherwise use the flat pre-displacement normals
 }
 
-// Fine grain + sparkle, layered on top of the vertex-color undulation
-// shading above via ordinary texture maps rather than a custom shader --
-// standard MeshStandardMaterial multiplies vertexColors x map together
+// Fine grain, layered on top of the vertex-color undulation shading above
+// via an ordinary texture map rather than a custom shader -- standard
+// MeshStandardMaterial multiplies vertexColors x map together
 // automatically, so this composites correctly with the existing lighting/
-// fog for free, no shader surgery needed. Both textures are generated once
-// at load time onto an offscreen canvas (no external image assets, same
-// "everything procedural, no build step" approach as the rest of the
-// file) and tiled via RepeatWrapping, so texel detail doesn't depend on
-// the ground mesh's own (fairly coarse) vertex density the way vertex
-// colors did.
+// fog for free, no shader surgery needed. Generated once at load time onto
+// an offscreen canvas (no external image assets, same "everything
+// procedural, no build step" approach as the rest of the file) and tiled
+// via RepeatWrapping, so texel detail doesn't depend on the ground mesh's
+// own (fairly coarse) vertex density the way vertex colors did.
+// (A sparkle/glint emissive map previously lived here too, but was removed
+// -- under this scene's soft overcast lighting there's no distinct light
+// source for snow to catch, so glint highlights didn't make physical sense.)
 function clampByte(v){ return Math.max(0, Math.min(255, v | 0)); }
 
 // Small, low-contrast per-pixel luminance jitter -- reads as grain/texture
@@ -211,46 +213,14 @@ function makeSnowGrainTexture(size){
   return tex;
 }
 
-// Sparse bright dots on black, used as an emissive map -- a handful of
-// "crystals" that stay bright regardless of the soft overcast lighting,
-// standing in for snow catching the light. The camera never moves in this
-// scene, so a fixed pattern reads the same as true view-dependent glinting
-// would from this one fixed angle, without needing custom specular shader
-// code to get there.
-function makeSparkleTexture(size, dotCount){
-  const cnv = document.createElement('canvas');
-  cnv.width = cnv.height = size;
-  const ctx = cnv.getContext('2d');
-  ctx.fillStyle = '#000000';
-  ctx.fillRect(0, 0, size, size);
-  ctx.fillStyle = '#ffffff';
-  for (let i = 0; i < dotCount; i++) {
-    const x = rng() * size, y = rng() * size;
-    const r = range(0.6, 1.8);
-    ctx.globalAlpha = range(0.55, 1.0);
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.globalAlpha = 1;
-  const tex = new THREE.CanvasTexture(cnv);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  return tex;
-}
-
 const grainTex = makeSnowGrainTexture(256);
 grainTex.repeat.set(50, 28); // tiled fine enough to read as grain rather than visible large tiles, across the 400x220 ground
-const sparkleTex = makeSparkleTexture(512, 400); // more, brighter dots (was 260) -- more of the ground catches light at once
-sparkleTex.repeat.set(16, 9); // coarser repeat than the grain -- keeps individual sparkle dots looking sparse/soft rather than a dense regular-looking speckle
 
 const groundMat = new THREE.MeshStandardMaterial({
   vertexColors: true,
   roughness: 0.92,
   metalness: 0.0,
   map: grainTex,
-  emissive: 0xffffff,
-  emissiveMap: sparkleTex,
-  emissiveIntensity: 0.5, // stronger glints (was 0.28), still individual points rather than an overall glow
 });
 const ground = new THREE.Mesh(groundGeo, groundMat);
 scene.add(ground);
