@@ -318,7 +318,7 @@ tier2Geo.translate(0, TIER2_BASE_Y + TIER2_H / 2, 0);
 // pinned to pure green by construction (pow(0, x) = 0, see the exponent
 // comment in the shader patch below) regardless of how high this goes.
 const SNOW_BUILDUP_MAX   = 0.92;
-const SNOW_BUILDUP_SPAN  = 100; // seconds to go from start to max coverage
+const SNOW_BUILDUP_SPAN  = 25; // seconds to go from start to max coverage
 
 // Per-instance "last dusted" timestamp (simTime at last tap, 0 = never
 // tapped). This is the one piece of real per-tree state the tap-to-reset
