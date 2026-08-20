@@ -268,9 +268,8 @@ const HEIGHT_MULT = 1.65;
 // geometry was identical for every tree) -- randomized once at load via the
 // same seeded rng as everything else, not per-tree, so this stays a single
 // small array rather than 360 separate layouts.
-// Fourth pass: count is confirmed good at 130 (good clump character, not
-// blobby) -- do NOT raise it further. Only card SIZE goes up again here,
-// to close the remaining gaps without adding more cards.
+// Fifth pass: count stays locked at 130 (confirmed good clump character).
+// Size goes up again -- still gaps at the previous size, per feedback.
 const CARD_BANDS = [
   { yFrac: 0.06, radius: TIER1_R * 0.95, count: 32 },
   { yFrac: 0.22, radius: TIER1_R * 0.80, count: 27 },
@@ -288,8 +287,8 @@ for (const band of CARD_BANDS) {
     // Sized against the vertical gap between bands (not the whole canopy
     // radius) -- modest, roughly clump-sized absolute dimensions, small and
     // numerous enough to overlap into continuous-looking foliage.
-    const w = range(0.40, 0.62);
-    const h = range(0.38, 0.55);
+    const w = range(0.52, 0.80);
+    const h = range(0.48, 0.70);
     // Small random lean/roll per card (not just the shared yaw below) --
     // uniform flat cards all tilted identically within a band read as
     // repeated stickers; a bit of individual tilt variety breaks that up.
@@ -481,21 +480,29 @@ const resetTimeAttr = new Float32Array(TREE_COUNT);
 
 const trunkMat = new THREE.MeshStandardMaterial({ color: 0x3b2e26, roughness: 0.95 });
 
-// Real alpha blending (not alphaTest) after a live A/B check: alphaTest is
-// a binary keep/discard per pixel, so no matter how gradual the texture's
-// alpha ramp is, the rendered edge is always a hard cutoff -- that's the
-// structural reason an earlier alphaTest-based version of these cards kept
-// reading as distinct "blobs" even after softening the texture itself.
-// Real transparency lets edges genuinely fade into whatever's behind them.
-// Trade-off, worth watching for on real hardware: three.js does not depth-
-// sort individual instances WITHIN one InstancedMesh, so overlapping
-// blended cards could occasionally show a sorting artifact (the "wrong"
-// card rendering on top) -- unlike alphaTest, which had no sorting
-// concerns at all since it's opaque+discard, not blended.
+// Back to alphaTest (was real alpha blending for a while). That earlier
+// switch traded away correct depth handling for softer edges: with
+// depthWrite:false, overlapping transparent fragments from DIFFERENT
+// trees blend in whatever order they're drawn in (raw instance order),
+// not true depth -- a CPU-side one-time back-to-front sort by tree
+// position (treeRenderOrder/blockPosOfTree, still used below for the
+// instance layout) patched the common case, but it's fundamentally a
+// per-TREE approximation: it can't account for a shake wobble briefly
+// moving a card closer than the static sort assumed, or for individual
+// cards genuinely interpenetrating between two adjacent, similarly-sized
+// trees -- both showed up as real, reproducible cross-tree overlap
+// artifacts. alphaTest + depthWrite:true uses the GPU's real depth buffer
+// instead, which is correct by construction regardless of draw order,
+// shake, or card size -- no more CPU-side sorting needed for CORRECTNESS
+// (the tree render order is harmless to keep, just no longer load-bearing
+// for this). The "blobby hard edge" concern that originally motivated
+// blending was mostly about the OLD hard-edged-circle texture; the
+// current texture's soft gradients, spiky needle strokes past the blob
+// extent, and punched holes still read as irregular through an alphaTest
+// cutout -- the only real loss is the last 1-2 pixels of edge feathering.
 const cardMat = new THREE.MeshStandardMaterial({
   map: needleTex,
-  transparent: true,
-  depthWrite: false,
+  alphaTest: 0.3,
   roughness: 0.85,
   side: THREE.DoubleSide, // cards aren't true billboards, so both faces need to shade correctly from any angle
   // Explicit, not left to three's auto-detected default. Mobile Apple GPUs
