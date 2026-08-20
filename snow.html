@@ -268,13 +268,19 @@ const HEIGHT_MULT = 1.65;
 // geometry was identical for every tree) -- randomized once at load via the
 // same seeded rng as everything else, not per-tree, so this stays a single
 // small array rather than 360 separate layouts.
+// Third density pass: the second pass (58 -> 91 cards, WITH a size
+// increase too) closed noticeably more gap than the first, confirming that
+// count+size-together is the right lever, just needed more of it. This
+// pass pushes both further again (91 -> 130 cards, size up again) --
+// explicitly trading away more of the "distinct airy clump" character for
+// a solid, continuous canopy, per direct instruction.
 const CARD_BANDS = [
-  { yFrac: 0.06, radius: TIER1_R * 0.95, count: 10 },
-  { yFrac: 0.22, radius: TIER1_R * 0.80, count: 9 },
-  { yFrac: 0.38, radius: TIER1_R * 0.60, count: 8 },
-  { yFrac: 0.55, radius: TIER2_R * 0.90, count: 7 },
-  { yFrac: 0.72, radius: TIER2_R * 0.60, count: 5 },
-  { yFrac: 0.90, radius: TIER2_R * 0.25, count: 4 },
+  { yFrac: 0.06, radius: TIER1_R * 0.95, count: 32 },
+  { yFrac: 0.22, radius: TIER1_R * 0.80, count: 27 },
+  { yFrac: 0.38, radius: TIER1_R * 0.60, count: 24 },
+  { yFrac: 0.55, radius: TIER2_R * 0.90, count: 20 },
+  { yFrac: 0.72, radius: TIER2_R * 0.60, count: 16 },
+  { yFrac: 0.90, radius: TIER2_R * 0.25, count: 11 },
 ];
 const CARD_SLOTS = [];
 for (const band of CARD_BANDS) {
@@ -285,8 +291,8 @@ for (const band of CARD_BANDS) {
     // Sized against the vertical gap between bands (not the whole canopy
     // radius) -- modest, roughly clump-sized absolute dimensions, small and
     // numerous enough to overlap into continuous-looking foliage.
-    const w = range(0.22, 0.36);
-    const h = range(0.20, 0.32);
+    const w = range(0.32, 0.50);
+    const h = range(0.30, 0.44);
     // Small random lean/roll per card (not just the shared yaw below) --
     // uniform flat cards all tilted identically within a band read as
     // repeated stickers; a bit of individual tilt variety breaks that up.
@@ -295,7 +301,7 @@ for (const band of CARD_BANDS) {
     CARD_SLOTS.push({ y, angle, r, w, h, tiltX, tiltZ, heightT: band.yFrac });
   }
 }
-const CARDS_PER_TREE = CARD_SLOTS.length; // 43
+const CARDS_PER_TREE = CARD_SLOTS.length; // 130
 
 // Local (tree-space) transform for each slot, shared across every tree --
 // composed with each tree's own placement matrix at instance-build time.
