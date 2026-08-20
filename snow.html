@@ -226,8 +226,8 @@ function makeSparkleTexture(size, dotCount){
   ctx.fillStyle = '#ffffff';
   for (let i = 0; i < dotCount; i++) {
     const x = rng() * size, y = rng() * size;
-    const r = range(0.5, 1.3);
-    ctx.globalAlpha = range(0.35, 1.0);
+    const r = range(0.6, 1.8);
+    ctx.globalAlpha = range(0.55, 1.0);
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
@@ -240,7 +240,7 @@ function makeSparkleTexture(size, dotCount){
 
 const grainTex = makeSnowGrainTexture(256);
 grainTex.repeat.set(50, 28); // tiled fine enough to read as grain rather than visible large tiles, across the 400x220 ground
-const sparkleTex = makeSparkleTexture(512, 260);
+const sparkleTex = makeSparkleTexture(512, 400); // more, brighter dots (was 260) -- more of the ground catches light at once
 sparkleTex.repeat.set(16, 9); // coarser repeat than the grain -- keeps individual sparkle dots looking sparse/soft rather than a dense regular-looking speckle
 
 const groundMat = new THREE.MeshStandardMaterial({
@@ -250,7 +250,7 @@ const groundMat = new THREE.MeshStandardMaterial({
   map: grainTex,
   emissive: 0xffffff,
   emissiveMap: sparkleTex,
-  emissiveIntensity: 0.28, // soft -- individual glints, not a glowing surface
+  emissiveIntensity: 0.5, // stronger glints (was 0.28), still individual points rather than an overall glow
 });
 const ground = new THREE.Mesh(groundGeo, groundMat);
 scene.add(ground);
