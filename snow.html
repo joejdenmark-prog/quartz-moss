@@ -766,6 +766,7 @@ function spawnDustBurst(originPoint){
 // target level instead of only 0. The shader needs zero new code for this;
 // only the JS deciding what number to write changes.
 const TAP_COOLDOWN = 0.8; // seconds -- per tree, shared across both canopy tiers (one tapState per tree index, since a tap on either tier counts as tapping the whole tree)
+const TAP_FADE_DURATION = 0.25; // seconds -- how long a single tap's removal takes to visibly settle, rather than snapping instantly
 const tapState = new Array(treePlacements.length).fill(null); // lazily created per tree on first tap: { tapsRemaining, perTapRemoval, lastTapTime }
 
 // Mirrors the shader's coverage formula exactly (see canopyMat.onBeforeCompile)
@@ -774,6 +775,33 @@ function coverageNow(i, now){
   const elapsed = Math.max(0, now - resetTimeAttr.array[i]);
   const elapsedNorm = Math.min(1, elapsed / SNOW_BUILDUP_SPAN);
   return SNOW_BUILDUP_MAX * elapsedNorm;
+}
+
+// In-progress per-tap fades: tree index -> { fadeStartTime, fadeStartCoverage,
+// fadeTargetCoverage }. Driven from updateTapFades() every frame (see the
+// render loop) rather than written once in applyTap -- same reverse-solved-
+// aResetTime trick as the instant-jump version, just re-applied each frame
+// for TAP_FADE_DURATION seconds so the displayed coverage eases smoothly
+// from the pre-tap level to the post-tap level instead of snapping. No new
+// shader code either way: the shader still only ever reads aResetTime.
+const activeFades = new Map();
+
+function updateTapFades(now){
+  if (activeFades.size === 0) return;
+  for (const [i, fade] of activeFades) {
+    const elapsed = now - fade.fadeStartTime;
+    let coverage;
+    if (elapsed >= TAP_FADE_DURATION) {
+      coverage = fade.fadeTargetCoverage;
+      activeFades.delete(i);
+    } else {
+      const p = elapsed / TAP_FADE_DURATION;
+      const eased = p * p * (3 - 2 * p); // smoothstep -- same easing idiom used for fades elsewhere in this scene
+      coverage = fade.fadeStartCoverage + (fade.fadeTargetCoverage - fade.fadeStartCoverage) * eased;
+    }
+    resetTimeAttr.array[i] = now - SNOW_BUILDUP_SPAN * (coverage / SNOW_BUILDUP_MAX);
+  }
+  resetTimeAttr.needsUpdate = true;
 }
 
 // Applies one tap to tree `i`. Returns true if it actually registered
@@ -797,8 +825,14 @@ function applyTap(i, now){
   state.lastTapTime = now;
   state.tapsRemaining -= 1;
   const target = Math.max(0, current - state.perTapRemoval);
-  resetTimeAttr.array[i] = now - SNOW_BUILDUP_SPAN * (target / SNOW_BUILDUP_MAX);
-  resetTimeAttr.needsUpdate = true;
+  // Starts (or replaces, in the unlikely event one is still running) a fade
+  // from the current live level down to `target`, instead of writing
+  // aResetTime immediately -- updateTapFades() carries it the rest of the
+  // way each frame. TAP_COOLDOWN (0.8s) is comfortably longer than
+  // TAP_FADE_DURATION (0.25s), so back-to-back taps in a sequence never
+  // actually overlap in practice; this still resolves sanely if that ever
+  // changes, by just restarting the fade from wherever it currently is.
+  activeFades.set(i, { fadeStartTime: now, fadeStartCoverage: current, fadeTargetCoverage: target });
   return true;
 }
 
@@ -849,6 +883,7 @@ renderer.setAnimationLoop(() => {
   // the patched shader (onBeforeCompile runs on first use) -- guard for the
   // very first frame(s) before that's happened.
   if (canopyMat.userData.shader) canopyMat.userData.shader.uniforms.uTime.value = simTime;
+  updateTapFades(simTime);
 
   renderer.render(scene, camera);
 
@@ -860,7 +895,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future work ───────────────────────────────────────────
-window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, tier1Mesh, tier2Mesh, treePlacements, snow, snowMat, SNOW_COUNT, tier1Geo, tier2Geo, canopyMat, resetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, applyTap, coverageNow, tapState, TAP_COOLDOWN, get simTime(){ return simTime; } };
+window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, tier1Mesh, tier2Mesh, treePlacements, snow, snowMat, SNOW_COUNT, tier1Geo, tier2Geo, canopyMat, resetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, get simTime(){ return simTime; } };
 </script>
 </body>
 </html>
