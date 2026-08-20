@@ -268,12 +268,9 @@ const HEIGHT_MULT = 1.65;
 // geometry was identical for every tree) -- randomized once at load via the
 // same seeded rng as everything else, not per-tree, so this stays a single
 // small array rather than 360 separate layouts.
-// Third density pass: the second pass (58 -> 91 cards, WITH a size
-// increase too) closed noticeably more gap than the first, confirming that
-// count+size-together is the right lever, just needed more of it. This
-// pass pushes both further again (91 -> 130 cards, size up again) --
-// explicitly trading away more of the "distinct airy clump" character for
-// a solid, continuous canopy, per direct instruction.
+// Fourth pass: count is confirmed good at 130 (good clump character, not
+// blobby) -- do NOT raise it further. Only card SIZE goes up again here,
+// to close the remaining gaps without adding more cards.
 const CARD_BANDS = [
   { yFrac: 0.06, radius: TIER1_R * 0.95, count: 32 },
   { yFrac: 0.22, radius: TIER1_R * 0.80, count: 27 },
@@ -291,8 +288,8 @@ for (const band of CARD_BANDS) {
     // Sized against the vertical gap between bands (not the whole canopy
     // radius) -- modest, roughly clump-sized absolute dimensions, small and
     // numerous enough to overlap into continuous-looking foliage.
-    const w = range(0.32, 0.50);
-    const h = range(0.30, 0.44);
+    const w = range(0.40, 0.62);
+    const h = range(0.38, 0.55);
     // Small random lean/roll per card (not just the shared yaw below) --
     // uniform flat cards all tilted identically within a band read as
     // repeated stickers; a bit of individual tilt variety breaks that up.
@@ -699,6 +696,29 @@ function scatterTrees(count){
 }
 const treePlacements = scatterTrees(TREE_COUNT);
 
+// Card instances are grouped into one fixed-size block per tree, but the
+// BLOCK ORDER is sorted back-to-front by distance from the camera --
+// not tree placement order. This is what makes cross-tree occlusion
+// correct: cards use depthWrite:false (needed so their soft alpha-blended
+// edges actually fade instead of punching a hard silhouette), so
+// overlapping transparent fragments from DIFFERENT trees blend in
+// whatever order they're drawn in, not by true depth -- without this fix,
+// a farther tree's cards could paint over a nearer tree's cards whenever
+// it happened to land at a later instance index than the nearer tree.
+// Since this scene's camera never moves, a single back-to-front sort
+// computed once at load stays correct for the entire session -- a real
+// painter's algorithm, exact (not an approximation) specifically because
+// the viewpoint is fixed.
+const treeRenderOrder = treePlacements
+  .map((p, i) => ({ i, distSq: (p.x - camera.position.x) ** 2 + (p.z - camera.position.z) ** 2 }))
+  .sort((a, b) => b.distSq - a.distSq)
+  .map(e => e.i);
+// blockPosOfTree[treeIndex] -> where that tree's card block sits in the
+// instance buffer. treeRenderOrder[blockPos] -> treeIndex is the inverse,
+// used by handleTap's raycast-hit-to-tree lookup below.
+const blockPosOfTree = new Array(treePlacements.length);
+treeRenderOrder.forEach((treeIdx, blockPos) => { blockPosOfTree[treeIdx] = blockPos; });
+
 // Per-tree transform WITHOUT rotationY, used only for card instancing --
 // cards ignore the trunk's own random yaw (their local slot angles are
 // already randomized in CARD_SLOTS, and un-rotating them here avoids
@@ -741,7 +761,9 @@ for (let i = 0; i < treePlacements.length; i++) {
   tint.setHSL(0.32 + range(-0.03, 0.03), 0.18 + range(-0.06, 0.06), 0.92 + range(-0.06, 0.04));
 
   for (let j = 0; j < CARDS_PER_TREE; j++) {
-    const instIdx = i * CARDS_PER_TREE + j;
+    // Block position (blockPosOfTree[i]), not tree placement index i --
+    // see the back-to-front sort comment above.
+    const instIdx = blockPosOfTree[i] * CARDS_PER_TREE + j;
     // instanceMatrix: kept correct (raycasting only -- see the shader
     // patch above for why rendering no longer reads this).
     _finalMat.multiplyMatrices(cardTreeMatrices[i], CARD_SLOT_MATRICES[j]);
@@ -1087,7 +1109,7 @@ function coverageNow(i, now){
 // purely the GPU-facing copy the shader actually reads.
 function writeTreeResetTime(i, value){
   resetTimeAttr[i] = value;
-  const base = i * CARDS_PER_TREE;
+  const base = blockPosOfTree[i] * CARDS_PER_TREE;
   for (let j = 0; j < CARDS_PER_TREE; j++) cardResetTimeArr[base + j] = value;
 }
 
@@ -1179,7 +1201,7 @@ function updateShakes(now){
       angleJitter = Math.sin(elapsed * 18.0) * 0.14 * envelope
                   + Math.sin(elapsed * 31.0 + 1.3) * 0.05 * envelope;
     }
-    const base = i * CARDS_PER_TREE;
+    const base = blockPosOfTree[i] * CARDS_PER_TREE;
     // aShakeAngle is what actually drives the rendered wobble now (see the
     // vertex shader). The instanceMatrix rewrite below is kept purely so
     // raycasting stays roughly in sync with the visual during a shake --
@@ -1200,10 +1222,11 @@ function updateShakes(now){
 
 // Raycast against the canopy InstancedMesh (three.js raycaster natively
 // resolves instanceId on InstancedMesh hits) to find which tree, if any,
-// was tapped -- a hit instance index is a card index, so it's converted
-// back to a tree index by dividing out CARDS_PER_TREE. pointerdown (not
-// click) for lower touch latency and because it pairs naturally with the
-// canvas's existing touch-action:none.
+// was tapped -- a hit instance index is a card index; dividing out
+// CARDS_PER_TREE gives the card's BLOCK position (see the back-to-front
+// sort above), which treeRenderOrder maps back to the real tree index.
+// pointerdown (not click) for lower touch latency and because it pairs
+// naturally with the canvas's existing touch-action:none.
 const tapRaycaster = new THREE.Raycaster();
 const tapNDC = new THREE.Vector2();
 function handleTap(clientX, clientY){
@@ -1216,8 +1239,9 @@ function handleTap(clientX, clientY){
   const hit = hits[0];
   const cardIdx = hit.instanceId;
   if (cardIdx == null) return null;
-  const i = Math.floor(cardIdx / CARDS_PER_TREE);
-  if (i >= treePlacements.length) return null;
+  const blockPos = Math.floor(cardIdx / CARDS_PER_TREE);
+  if (blockPos >= treeRenderOrder.length) return null;
+  const i = treeRenderOrder[blockPos];
   const registered = applyTap(i, simTime);
   if (registered) {
     spawnDustBurst(hit.point);
@@ -1265,7 +1289,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future work ───────────────────────────────────────────
-window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, HEIGHT_MULT, cardPlaceAAttr, cardPlaceBAttr, cardSlotSizeAttr, cardShakeAngleAttr, get simTime(){ return simTime; } };
+window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, HEIGHT_MULT, cardPlaceAAttr, cardPlaceBAttr, cardSlotSizeAttr, cardShakeAngleAttr, treeRenderOrder, blockPosOfTree, get simTime(){ return simTime; } };
 </script>
 </body>
 </html>
