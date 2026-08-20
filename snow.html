@@ -425,6 +425,39 @@ cardGeo.setAttribute('aHeightT', cardHeightTAttr);
 cardGeo.setAttribute('aResetTime', cardResetTimeAttr);
 cardGeo.setAttribute('aCardTint', cardTintAttr);
 
+// Raw per-card placement data, read directly by the vertex shader instead
+// of instanceMatrix -- see the long comment in cardMat.onBeforeCompile
+// below for why. instanceMatrix is still populated correctly elsewhere
+// (for CPU-side raycasting only); these are what actually drive rendering.
+// Packed into 2 vec4s rather than 6 separate attributes: WebGL only
+// guarantees 16 vertex attribute slots total, and a vec2/vec3/vec4
+// attribute costs exactly the same ONE slot as a plain float (only mat4,
+// like instanceMatrix, costs more -- 4 slots) -- so component count is
+// free, attribute COUNT is what's scarce. Baseline usage here is already
+// position+normal+uv (3) + instanceMatrix (4) + instanceColor (1) + the
+// existing aHeightT/aResetTime/aCardTint (3) = 11; adding 6-8 more
+// one-at-a-time attributes overflowed the 16-slot budget in testing
+// ("Too many attributes"). aSlotSize and aShakeAngle stay separate: size
+// is only 2 floats (cheap on its own) and shake needs frequent rewrites
+// isolated from the mostly-static placement data.
+const cardPlaceAArr = new Float32Array(TREE_COUNT * CARDS_PER_TREE * 4); // x: treeX, y: treeZ, z: treeScale, w: slotAngle
+const cardPlaceBArr = new Float32Array(TREE_COUNT * CARDS_PER_TREE * 4); // x: slotRadius, y: slotY, z: tiltX, w: tiltZ
+const cardSlotSizeArr  = new Float32Array(TREE_COUNT * CARDS_PER_TREE * 2);
+// Live per-tree dusting-shake wobble angle, mirrored across a tree's cards
+// exactly like cardResetTimeArr -- default 0 (no wobble), written by
+// updateShakes() below.
+const cardShakeAngleArr = new Float32Array(TREE_COUNT * CARDS_PER_TREE);
+
+const cardPlaceAAttr     = new THREE.InstancedBufferAttribute(cardPlaceAArr, 4);
+const cardPlaceBAttr     = new THREE.InstancedBufferAttribute(cardPlaceBArr, 4);
+const cardSlotSizeAttr   = new THREE.InstancedBufferAttribute(cardSlotSizeArr, 2);
+const cardShakeAngleAttr = new THREE.InstancedBufferAttribute(cardShakeAngleArr, 1);
+cardShakeAngleAttr.setUsage(THREE.DynamicDrawUsage); // rewritten every frame while a tree is actively shaking
+cardGeo.setAttribute('aPlaceA', cardPlaceAAttr);
+cardGeo.setAttribute('aPlaceB', cardPlaceBAttr);
+cardGeo.setAttribute('aSlotSize', cardSlotSizeAttr);
+cardGeo.setAttribute('aShakeAngle', cardShakeAngleAttr);
+
 // Snow buildup: starts bare, gradually covers more of each canopy over
 // SNOW_BUILDUP_SPAN seconds, capped at SNOW_BUILDUP_MAX so trees settle
 // into "convincingly snow-laden" rather than becoming solid white blobs.
@@ -489,15 +522,31 @@ cardMat.onBeforeCompile = (shader) => {
   shader.uniforms.uCanopySnow = { value: CANOPY_SNOW };
   shader.uniforms.uBuildupMax = { value: SNOW_BUILDUP_MAX };
   shader.uniforms.uBuildupSpan = { value: SNOW_BUILDUP_SPAN };
+  shader.uniforms.uHeightMult = { value: HEIGHT_MULT };
 
   shader.vertexShader = `
     attribute float aHeightT;
     attribute float aResetTime;
     attribute float aCardTint;
-    uniform float uTime, uBuildupMax, uBuildupSpan;
+    // Packed to stay under WebGL's 16-vertex-attribute-slot guarantee (see
+    // the JS-side comment where these are built) -- aPlaceA: treeX, treeZ,
+    // treeScale, slotAngle. aPlaceB: slotRadius, slotY, tiltX, tiltZ.
+    attribute vec4 aPlaceA;
+    attribute vec4 aPlaceB;
+    attribute vec2 aSlotSize;
+    attribute float aShakeAngle;
+    uniform float uTime, uBuildupMax, uBuildupSpan, uHeightMult;
     uniform vec3 uCanopyGreen, uCanopySnow;
     varying vec3 vSnowColor;
-  ` + shader.vertexShader.replace('#include <color_vertex>', `
+
+    // Plain axis rotations, applied as explicit trigonometry -- never
+    // composed into a Matrix3/Matrix4 object, on the CPU or the GPU. See
+    // the note at the position patch below for why that matters here.
+    vec3 rotateAxisX(vec3 p, float a){ float c = cos(a), s = sin(a); return vec3(p.x, c*p.y - s*p.z, s*p.y + c*p.z); }
+    vec3 rotateAxisY(vec3 p, float a){ float c = cos(a), s = sin(a); return vec3(c*p.x + s*p.z, p.y, -s*p.x + c*p.z); }
+    vec3 rotateAxisZ(vec3 p, float a){ float c = cos(a), s = sin(a); return vec3(c*p.x - s*p.y, s*p.x + c*p.y, p.z); }
+  ` + shader.vertexShader
+    .replace('#include <color_vertex>', `
     #include <color_vertex>
     {
       float elapsed = max(uTime - aResetTime, 0.0);
@@ -522,6 +571,63 @@ cardMat.onBeforeCompile = (shader) => {
       #endif
       vSnowColor = snowColor;
     }
+  `)
+    .replace('#include <defaultnormal_vertex>', `
+    // Standard instancing's normal transform (in three's own
+    // defaultnormal_vertex chunk) derives orientation from instanceMatrix,
+    // which cards deliberately don't use for rendering any more (see the
+    // position patch below). A flat plane's normal only ever needs
+    // rotating, never adjusted for scale (stretching a plane wider/taller
+    // doesn't change which way it faces, only shearing would, and nothing
+    // here shears), so this is just the same rotation sequence as the
+    // position patch, applied to the base (0,0,1) normal.
+    vec3 cardNormal = objectNormal;
+    cardNormal = rotateAxisX(cardNormal, aPlaceB.z);  // tiltX
+    cardNormal = rotateAxisZ(cardNormal, aPlaceB.w);  // tiltZ
+    cardNormal = rotateAxisY(cardNormal, aPlaceA.w + aShakeAngle); // slotAngle + shake
+    vec3 transformedNormal = normalMatrix * cardNormal;
+  `)
+    .replace('#include <project_vertex>', `
+    // Deliberately bypasses instanceMatrix entirely for cards (trunk still
+    // uses it normally, unaffected by any of this). The prior version
+    // composed a tree-level Matrix4 (non-uniform scale: Y stretched by
+    // HEIGHT_MULT, X/Z not) with each card's own Matrix4 (its independent
+    // tilt/yaw rotation) via multiplyMatrices, then let three's standard
+    // instancing chunk apply the result through instanceMatrix. That
+    // composition order was fixed once already (moving the non-uniform
+    // scale to apply innermost, before any rotation -- shear-free by
+    // construction, confirmed via basis-vector orthogonality checks) and
+    // that fix was verified working on macOS Safari via safaridriver:
+    // numerically, statistically, and with a direct visual marker-sphere
+    // test. It still did not fix the bug on real iPadOS Safari, which
+    // means the divergence is a GPU/driver-specific difference in how
+    // mobile Apple Silicon handles Matrix4-based instanced transforms (or
+    // their interpolation/upload), not a remaining algebra error -- macOS
+    // Safari and iPadOS Safari are different enough here that the former
+    // isn't a reliable proxy for this bug. Rather than keep guessing at
+    // that mechanism blind, this sidesteps Matrix4/Matrix3 composition for
+    // RENDERING entirely: every card's final world position is computed
+    // right here from raw scalar/vector attributes via explicit
+    // trigonometry, identically on any GPU since there's no matrix object
+    // or per-instance matrix attribute involved anywhere in the
+    // computation. instanceMatrix is still kept correctly populated
+    // elsewhere in this file, but only for CPU-side raycasting (tap-to-
+    // dust-off hit-testing), which runs in plain JS and was never actually
+    // exposed to whatever this GPU-side issue is.
+    vec3 sized = vec3(position.x * aSlotSize.x, position.y * aSlotSize.y * uHeightMult, 0.0);
+    float slotAngle = aPlaceA.w, slotRadius = aPlaceB.x, slotY = aPlaceB.y, tiltX = aPlaceB.z, tiltZ = aPlaceB.w;
+    sized = rotateAxisX(sized, tiltX);
+    sized = rotateAxisZ(sized, tiltZ);
+    sized = rotateAxisY(sized, slotAngle + aShakeAngle);
+
+    vec3 slotOffset = vec3(cos(slotAngle) * slotRadius, slotY * uHeightMult, sin(slotAngle) * slotRadius);
+    slotOffset = rotateAxisY(slotOffset, aShakeAngle);
+
+    vec3 worldLocal = (sized + slotOffset) * aPlaceA.z; // treeScale
+    vec3 worldPos = worldLocal + vec3(aPlaceA.x, 0.0, aPlaceA.y); // treeX, treeZ
+
+    vec4 mvPosition = modelViewMatrix * vec4(worldPos, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
   `);
   shader.fragmentShader = `varying vec3 vSnowColor;\nfloat vTexLum;\n` +
     shader.fragmentShader
@@ -630,11 +736,26 @@ for (let i = 0; i < treePlacements.length; i++) {
 
   for (let j = 0; j < CARDS_PER_TREE; j++) {
     const instIdx = i * CARDS_PER_TREE + j;
+    // instanceMatrix: kept correct (raycasting only -- see the shader
+    // patch above for why rendering no longer reads this).
     _finalMat.multiplyMatrices(cardTreeMatrices[i], CARD_SLOT_MATRICES[j]);
     cardMesh.setMatrixAt(instIdx, _finalMat);
     cardMesh.setColorAt(instIdx, tint);
     cardHeightTArr[instIdx] = CARD_SLOTS[j].heightT;
     cardTintArr[instIdx] = range(0.78, 1.18);
+
+    // Raw placement data the vertex shader actually renders from.
+    const slot = CARD_SLOTS[j];
+    cardPlaceAArr[instIdx*4]   = x;
+    cardPlaceAArr[instIdx*4+1] = z;
+    cardPlaceAArr[instIdx*4+2] = scale;
+    cardPlaceAArr[instIdx*4+3] = slot.angle;
+    cardPlaceBArr[instIdx*4]   = slot.r;
+    cardPlaceBArr[instIdx*4+1] = slot.y;
+    cardPlaceBArr[instIdx*4+2] = slot.tiltX;
+    cardPlaceBArr[instIdx*4+3] = slot.tiltZ;
+    cardSlotSizeArr[instIdx*2] = slot.w;
+    cardSlotSizeArr[instIdx*2+1] = slot.h;
   }
 }
 // Placements can land short of TREE_COUNT if the field fills up before
@@ -647,6 +768,9 @@ cardMesh.instanceMatrix.needsUpdate = true;
 cardMesh.instanceColor.needsUpdate = true;
 cardHeightTAttr.needsUpdate = true;
 cardTintAttr.needsUpdate = true;
+cardPlaceAAttr.needsUpdate = true;
+cardPlaceBAttr.needsUpdate = true;
+cardSlotSizeAttr.needsUpdate = true;
 // cardGeo's own raw bounding sphere (a small 1x1 plane near the origin)
 // doesn't reflect where the 15k+ instances actually sit once scattered
 // across the whole forest -- same reasoning as `snow`/`dust` elsewhere in
@@ -1049,15 +1173,23 @@ function updateShakes(now){
       angleJitter = Math.sin(elapsed * 18.0) * 0.14 * envelope
                   + Math.sin(elapsed * 31.0 + 1.3) * 0.05 * envelope;
     }
+    const base = i * CARDS_PER_TREE;
+    // aShakeAngle is what actually drives the rendered wobble now (see the
+    // vertex shader). The instanceMatrix rewrite below is kept purely so
+    // raycasting stays roughly in sync with the visual during a shake --
+    // matrices are fine for that CPU-side purpose, since raycasting was
+    // never exposed to the GPU-side rendering bug.
+    for (let j = 0; j < CARDS_PER_TREE; j++) cardShakeAngleArr[base + j] = angleJitter;
+
     _shakeRot.makeRotationY(angleJitter);
     _shakeCombined.multiplyMatrices(cardTreeMatrices[i], _shakeRot);
-    const base = i * CARDS_PER_TREE;
     for (let j = 0; j < CARDS_PER_TREE; j++) {
       _finalMat.multiplyMatrices(_shakeCombined, CARD_SLOT_MATRICES[j]);
       cardMesh.setMatrixAt(base + j, _finalMat);
     }
   }
   cardMesh.instanceMatrix.needsUpdate = true;
+  cardShakeAngleAttr.needsUpdate = true;
 }
 
 // Raycast against the canopy InstancedMesh (three.js raycaster natively
@@ -1127,7 +1259,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future work ───────────────────────────────────────────
-window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, get simTime(){ return simTime; } };
+window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, HEIGHT_MULT, cardPlaceAAttr, cardPlaceBAttr, cardSlotSizeAttr, cardShakeAngleAttr, get simTime(){ return simTime; } };
 </script>
 </body>
 </html>
