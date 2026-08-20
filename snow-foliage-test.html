@@ -199,7 +199,7 @@ scene.add(ground);
 // ── Trees ─────────────────────────────────────────────────────────────────────
 // PROTOTYPE (Option B from the tree-detail exploration): the canopy is no
 // longer smooth cones. Instead each tree gets a small cluster of flat,
-// alpha-cutout "needle clump" cards arranged in a rough conical taper
+// alpha-blended "needle clump" cards arranged in a rough conical taper
 // (wide/low near the trunk, narrow/high at the tip) approximating the same
 // silhouette the two-tier cones used to. All cards across the whole forest
 // share ONE geometry + ONE material + ONE InstancedMesh (same discipline as
@@ -232,12 +232,12 @@ const CANOPY_Y_SPAN = CANOPY_Y_TOP - CANOPY_Y_BOTTOM;
 // same seeded rng as everything else, not per-tree, so this stays a single
 // small array rather than 360 separate layouts.
 const CARD_BANDS = [
-  { yFrac: 0.06, radius: TIER1_R * 0.95, count: 7 },
-  { yFrac: 0.24, radius: TIER1_R * 0.78, count: 6 },
-  { yFrac: 0.42, radius: TIER1_R * 0.55, count: 5 },
-  { yFrac: 0.60, radius: TIER2_R * 0.85, count: 5 },
-  { yFrac: 0.77, radius: TIER2_R * 0.55, count: 4 },
-  { yFrac: 0.92, radius: TIER2_R * 0.22, count: 3 },
+  { yFrac: 0.06, radius: TIER1_R * 0.95, count: 10 },
+  { yFrac: 0.22, radius: TIER1_R * 0.80, count: 9 },
+  { yFrac: 0.38, radius: TIER1_R * 0.60, count: 8 },
+  { yFrac: 0.55, radius: TIER2_R * 0.90, count: 7 },
+  { yFrac: 0.72, radius: TIER2_R * 0.60, count: 5 },
+  { yFrac: 0.90, radius: TIER2_R * 0.25, count: 4 },
 ];
 const CARD_SLOTS = [];
 for (const band of CARD_BANDS) {
@@ -245,71 +245,102 @@ for (const band of CARD_BANDS) {
     const angle = (k / band.count) * Math.PI * 2 + range(-0.3, 0.3);
     const y = CANOPY_Y_BOTTOM + band.yFrac * CANOPY_Y_SPAN + range(-0.05, 0.05);
     const r = band.radius * range(0.85, 1.15);
-    // Sized against the ~0.49-unit vertical gap between bands (not against
-    // the whole canopy radius, which is what produced a handful of oversized
-    // dominant blades instead of many small overlapping clumps the first
-    // time around) -- modest, roughly clump-sized absolute dimensions.
-    const w = range(0.32, 0.5);
-    const h = range(0.28, 0.46);
-    CARD_SLOTS.push({ y, angle, r, w, h, heightT: band.yFrac });
+    // Smaller than the first pass (was 0.32-0.5 / 0.28-0.46) and MORE of
+    // them (43 vs 30) -- more, smaller, more-overlapping clumps read as
+    // continuous fuzzy foliage rather than a few big distinct "blobs".
+    const w = range(0.22, 0.36);
+    const h = range(0.20, 0.32);
+    // Small random lean/roll per card (not just the shared yaw below) --
+    // uniform flat cards all tilted identically within a band read as
+    // repeated stickers; a bit of individual tilt variety breaks that up.
+    const tiltX = range(-0.3, 0.3);
+    const tiltZ = range(-0.25, 0.25);
+    CARD_SLOTS.push({ y, angle, r, w, h, tiltX, tiltZ, heightT: band.yFrac });
   }
 }
-const CARDS_PER_TREE = CARD_SLOTS.length; // 30
+const CARDS_PER_TREE = CARD_SLOTS.length; // 43
 
 // Local (tree-space) transform for each slot, shared across every tree --
 // composed with each tree's own placement matrix at instance-build time.
 const slotDummy = new THREE.Object3D();
 const CARD_SLOT_MATRICES = CARD_SLOTS.map(s => {
   slotDummy.position.set(Math.cos(s.angle) * s.r, s.y, Math.sin(s.angle) * s.r);
-  slotDummy.rotation.set(0, s.angle, 0); // faces roughly radially outward from the trunk axis
+  slotDummy.rotation.set(s.tiltX, s.angle, s.tiltZ); // radially outward (yaw) plus a small individual lean/roll
   slotDummy.scale.set(s.w, s.h, 1);
   slotDummy.updateMatrix();
   return slotDummy.matrix.clone();
 });
 
-// Needle-clump silhouette: a soft filled "puff" body (overlapping blurred-
-// edge blobs) so the card reads as a solid clump rather than a hollow
-// shape, plus sharper needle strokes layered on top for edge texture. The
-// first version of this texture was ONLY thin radiating lines, which at
-// actual on-screen card size read as sparse scratchy arrows rather than
-// foliage -- no fillRect background either way (unlike the old sparkle
-// texture), so the canvas stays transparent everywhere nothing is drawn,
-// and that alpha channel becomes the cutout shape via alphaTest.
+// Needle-clump silhouette, v2. The first pass used hard-edged filled
+// circles (constant alpha within each disc, abrupt cutoff at the boundary)
+// -- that's exactly what makes something read as a discrete "blob" rather
+// than fuzzy foliage: a crisp, smooth, coin-like edge. This version uses
+// radial-gradient blobs that fade to zero alpha at the edge instead, so
+// real alpha blending genuinely feathers into whatever's behind it rather
+// than cutting a hard contour, plus a few soft holes
+// punched through the middle so the interior isn't one solid mass. Blobs
+// and needle strokes are also painted in varying GRAY levels (not flat
+// white) -- the shader now multiplies the snow-coverage color by this
+// grayscale value instead of fully replacing it (see the fragment patch
+// below), so each card gets real internal tonal variation instead of
+// being one uniformly flat-colored shape.
 function makeNeedleClusterTexture(size){
   const cnv = document.createElement('canvas');
   cnv.width = cnv.height = size;
   const ctx = cnv.getContext('2d');
   const baseX = size * 0.5, baseY = size * 0.95;
 
-  ctx.fillStyle = '#ffffff';
-  for (let i = 0; i < 11; i++) {
-    const bx = baseX + range(-size * 0.3, size * 0.3);
-    const by = baseY - range(size * 0.12, size * 0.6);
-    const r = range(size * 0.14, size * 0.26);
-    ctx.globalAlpha = range(0.4, 0.65);
+  const blobCount = 16;
+  for (let i = 0; i < blobCount; i++) {
+    const bx = baseX + range(-size * 0.32, size * 0.32);
+    const by = baseY - range(size * 0.1, size * 0.65);
+    const r = range(size * 0.1, size * 0.22);
+    const gray = Math.round(range(170, 255));
+    const grad = ctx.createRadialGradient(bx, by, 0, bx, by, r);
+    grad.addColorStop(0, `rgba(${gray},${gray},${gray},${range(0.75, 0.95)})`);
+    grad.addColorStop(0.6, `rgba(${gray},${gray},${gray},${range(0.4, 0.6)})`);
+    grad.addColorStop(1, `rgba(${gray},${gray},${gray},0)`);
+    ctx.fillStyle = grad;
     ctx.beginPath();
     ctx.arc(bx, by, r, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  ctx.strokeStyle = '#ffffff';
   ctx.lineCap = 'round';
-  const bladeCount = 30;
+  const bladeCount = 46;
   for (let i = 0; i < bladeCount; i++) {
-    const angle = range(-1.15, 1.15) - Math.PI / 2; // fans upward, ~130 degrees wide around straight-up
-    const len = range(size * 0.3, size * 0.75);
+    const angle = range(-1.2, 1.2) - Math.PI / 2; // fans upward, wide around straight-up; some poke past the blobs' extent for a spiky rather than smooth edge
+    const len = range(size * 0.28, size * 0.85);
     const tipX = baseX + Math.cos(angle) * len;
     const tipY = baseY + Math.sin(angle) * len;
-    const midX = (baseX + tipX) / 2 + range(-size * 0.05, size * 0.05);
+    const midX = (baseX + tipX) / 2 + range(-size * 0.06, size * 0.06);
     const midY = (baseY + tipY) / 2;
-    ctx.globalAlpha = range(0.6, 1.0);
-    ctx.lineWidth = range(size * 0.02, size * 0.045);
+    const gray = Math.round(range(190, 255));
+    ctx.strokeStyle = `rgba(${gray},${gray},${gray},${range(0.5, 0.95)})`;
+    ctx.lineWidth = range(size * 0.012, size * 0.03);
     ctx.beginPath();
     ctx.moveTo(baseX, baseY);
     ctx.quadraticCurveTo(midX, midY, tipX, tipY);
     ctx.stroke();
   }
-  ctx.globalAlpha = 1;
+
+  // Soft holes punched through the cluster body -- breaks up what would
+  // otherwise be one continuous filled mass in the middle.
+  ctx.globalCompositeOperation = 'destination-out';
+  for (let i = 0; i < 6; i++) {
+    const hx = baseX + range(-size * 0.28, size * 0.28);
+    const hy = baseY - range(size * 0.15, size * 0.55);
+    const hr = range(size * 0.04, size * 0.09);
+    const grad = ctx.createRadialGradient(hx, hy, 0, hx, hy, hr);
+    grad.addColorStop(0, 'rgba(255,255,255,0.65)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(hx, hy, hr, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+
   const tex = new THREE.CanvasTexture(cnv);
   return tex;
 }
@@ -330,11 +361,18 @@ const cardHeightTArr = new Float32Array(TREE_COUNT * CARDS_PER_TREE);
 // -- see writeTreeResetTime()). Needed because InstancedBufferAttribute is
 // indexed per-instance (per-card here), not per-tree.
 const cardResetTimeArr = new Float32Array(TREE_COUNT * CARDS_PER_TREE);
+// Per-CARD brightness jitter (independent of the per-TREE instanceColor
+// tint) -- without this, every card in the same height band on the same
+// tree is IDENTICAL in color (same heightT, same tree tint), which reads
+// as repeated stamped stickers rather than naturally varied foliage.
+const cardTintArr = new Float32Array(TREE_COUNT * CARDS_PER_TREE);
 const cardHeightTAttr = new THREE.InstancedBufferAttribute(cardHeightTArr, 1);
 const cardResetTimeAttr = new THREE.InstancedBufferAttribute(cardResetTimeArr, 1);
+const cardTintAttr = new THREE.InstancedBufferAttribute(cardTintArr, 1);
 cardResetTimeAttr.setUsage(THREE.DynamicDrawUsage);
 cardGeo.setAttribute('aHeightT', cardHeightTAttr);
 cardGeo.setAttribute('aResetTime', cardResetTimeAttr);
+cardGeo.setAttribute('aCardTint', cardTintAttr);
 
 // Snow buildup constants -- identical values/formula to the current
 // deployed scene, so the coverage/tap-dusting behavior being compared is
@@ -350,21 +388,31 @@ const resetTimeAttr = new Float32Array(TREE_COUNT);
 
 const trunkMat = new THREE.MeshStandardMaterial({ color: 0x3b2e26, roughness: 0.95 });
 
-// alphaTest (not `transparent:true`) is the deliberate choice here: it
-// keeps cards on the cheap opaque render path (normal depth-write, no
-// blend sorting) while still cutting out the fully-transparent parts of
-// the needle texture -- correct overlap/occlusion between many overlapping
-// cards without paying for real transparency sorting.
+// Switched from alphaTest to real blending after a live A/B check: alphaTest
+// is a binary keep/discard per pixel, so no matter how gradual the
+// texture's alpha ramp is, the RENDERED edge is always a hard cutoff --
+// that's a real structural reason cards kept reading as distinct "blobs"
+// even after softening the texture itself. Real transparency lets edges
+// genuinely fade into whatever's behind them (sky or a neighboring card).
+// Trade-off, and worth watching for on real hardware: three.js does not
+// depth-sort individual instances WITHIN one InstancedMesh, so overlapping
+// blended cards could occasionally show a sorting artifact (the "wrong"
+// card rendering on top) -- unlike alphaTest, which had no sorting
+// concerns at all since it's opaque+discard, not blended.
 const cardMat = new THREE.MeshStandardMaterial({
   map: needleTex,
-  alphaTest: 0.4,
+  transparent: true,
+  depthWrite: false,
   roughness: 0.85,
   side: THREE.DoubleSide, // cards aren't true billboards, so both faces need to shade correctly from any angle
 });
-// Same onBeforeCompile patch idiom as the deployed scene's canopy shader --
-// only the two attributes it reads are now per-instance (per-card) rather
-// than per-vertex/per-tree-instance, since a card is a single flat clump
-// rather than a smooth height-gradient surface.
+// Same onBeforeCompile patch idiom as the deployed scene's canopy shader,
+// extended two ways: (1) an extra per-card aCardTint multiply, and (2) the
+// fragment stage now MULTIPLIES the snow-coverage color by the sampled
+// texture's own grayscale value instead of fully replacing diffuseColor --
+// that's what lets the texture's internal shading variation (different
+// blobs/strokes painted at different gray levels) actually show up, rather
+// than every card being one flat, uniformly-colored cutout shape.
 cardMat.onBeforeCompile = (shader) => {
   shader.uniforms.uTime = { value: 0 };
   shader.uniforms.uCanopyGreen = { value: CANOPY_GREEN };
@@ -375,6 +423,7 @@ cardMat.onBeforeCompile = (shader) => {
   shader.vertexShader = `
     attribute float aHeightT;
     attribute float aResetTime;
+    attribute float aCardTint;
     uniform float uTime, uBuildupMax, uBuildupSpan;
     uniform vec3 uCanopyGreen, uCanopySnow;
     varying vec3 vSnowColor;
@@ -386,18 +435,23 @@ cardMat.onBeforeCompile = (shader) => {
       float coverage = uBuildupMax * elapsedNorm;
       float exponent = mix(1.6, 0.15, coverage);
       float blend = pow(aHeightT, exponent) * elapsedNorm;
-      vec3 snowColor = mix(uCanopyGreen, uCanopySnow, blend);
+      vec3 snowColor = mix(uCanopyGreen, uCanopySnow, blend) * aCardTint;
       #ifdef USE_INSTANCING_COLOR
         snowColor *= instanceColor.rgb;
       #endif
       vSnowColor = snowColor;
     }
   `);
-  shader.fragmentShader = `varying vec3 vSnowColor;\n` +
-    shader.fragmentShader.replace('#include <color_fragment>', `
-    #include <color_fragment>
-    diffuseColor.rgb = vSnowColor;
-  `);
+  shader.fragmentShader = `varying vec3 vSnowColor;\nfloat vTexLum;\n` +
+    shader.fragmentShader
+      .replace('#include <map_fragment>', `
+      #include <map_fragment>
+      vTexLum = diffuseColor.r;
+      `)
+      .replace('#include <color_fragment>', `
+      #include <color_fragment>
+      diffuseColor.rgb = vSnowColor * vTexLum;
+      `);
   cardMat.userData.shader = shader;
 };
 
@@ -470,6 +524,7 @@ for (let i = 0; i < treePlacements.length; i++) {
     cardMesh.setMatrixAt(instIdx, _finalMat);
     cardMesh.setColorAt(instIdx, tint);
     cardHeightTArr[instIdx] = CARD_SLOTS[j].heightT;
+    cardTintArr[instIdx] = range(0.78, 1.18);
   }
 }
 trunkMesh.count = treePlacements.length;
@@ -478,6 +533,7 @@ trunkMesh.instanceMatrix.needsUpdate = true;
 cardMesh.instanceMatrix.needsUpdate = true;
 cardMesh.instanceColor.needsUpdate = true;
 cardHeightTAttr.needsUpdate = true;
+cardTintAttr.needsUpdate = true;
 
 scene.add(trunkMesh, cardMesh);
 
