@@ -765,7 +765,7 @@ function spawnDustBurst(originPoint){
 // now, i.e. "make coverage 0 right now"), just solved for an arbitrary
 // target level instead of only 0. The shader needs zero new code for this;
 // only the JS deciding what number to write changes.
-const TAP_COOLDOWN = 0.5; // seconds -- per tree, shared across both canopy tiers (one tapState per tree index, since a tap on either tier counts as tapping the whole tree)
+const TAP_COOLDOWN = 0.8; // seconds -- per tree, shared across both canopy tiers (one tapState per tree index, since a tap on either tier counts as tapping the whole tree)
 const tapState = new Array(treePlacements.length).fill(null); // lazily created per tree on first tap: { tapsRemaining, perTapRemoval, lastTapTime }
 
 // Mirrors the shader's coverage formula exactly (see canopyMat.onBeforeCompile)
