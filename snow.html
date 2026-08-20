@@ -273,21 +273,58 @@ trunkGeo.translate(0, TRUNK_H / 2, 0); // base sits at local y=0 so it starts ri
 const CANOPY_GREEN = new THREE.Color(0x44543f); // muted, cool-toned green -- overcast winter light, not a saturated summer green
 const CANOPY_SNOW  = new THREE.Color(0xeef3f2); // pale snow-dusted tips
 
-// Colors the cone from base (green) to tip (snowy) BEFORE it's translated
-// into its final stacked position, while its own local Y still spans
-// -height/2..+height/2 -- simpler than working out the post-translate range.
+// Builds the cone's base-to-tip height fraction (0 at base, 1 at tip) per
+// vertex and stashes it in userData, but doesn't paint colors yet -- that
+// happens in paintCanopySnow() below, since coverage now changes over time
+// (the snow-buildup effect) instead of being fixed at build time. Computed
+// BEFORE the cone is translated into its final stacked position, while its
+// own local Y still spans -height/2..+height/2 -- simpler than working out
+// the post-translate range.
 function snowCappedCone(radius, height, radialSegs){
-  const geo = new THREE.ConeGeometry(radius, height, radialSegs, 1);
+  // heightSegments=8 (not 1) is required, not cosmetic: with only one height
+  // segment a cone has just two vertex rings (apex + base), so there's no
+  // intermediate geometry for a coverage gradient to ever move across --
+  // the "snow line" would only ever be the single apex vertex, regardless
+  // of coverage. More rings along the slant give paintCanopySnow() an
+  // actual gradient to push up/down. Still a handful of vertices per tree
+  // (shared across all instances, not duplicated), so this stays cheap.
+  const geo = new THREE.ConeGeometry(radius, height, radialSegs, 8);
   const pos = geo.attributes.position;
-  const colors = new Float32Array(pos.count * 3);
-  const c = new THREE.Color();
+  const heightT = new Float32Array(pos.count);
   for (let i = 0; i < pos.count; i++) {
-    const t = THREE.MathUtils.clamp(pos.getY(i) / height + 0.5, 0, 1);
-    c.copy(CANOPY_GREEN).lerp(CANOPY_SNOW, Math.pow(t, 1.6)); // biased so most of the cone stays green and only the upper portion looks snow-capped
-    colors[i*3] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
+    heightT[i] = THREE.MathUtils.clamp(pos.getY(i) / height + 0.5, 0, 1);
   }
-  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geo.userData.heightT = heightT;
+  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(pos.count * 3), 3));
   return geo;
+}
+
+// Repaints a canopy geometry's shared vertex colors for a given snow
+// coverage (0..1). Both canopy tiers reuse ONE geometry across all 360 tree
+// instances via instancing, so this repaints every tree in the forest at
+// once -- cheap (a few dozen vertices) and exactly why "all trees snow up
+// together" is the simple option: it's just re-running the same base-to-tip
+// gradient this cone always had, with the green/white boundary pushed
+// further down as coverage increases, rather than needing any per-instance
+// mechanism.
+const snowPaintColor = new THREE.Color();
+function paintCanopySnow(geo, coverage){
+  const heightT = geo.userData.heightT;
+  const colorAttr = geo.attributes.color;
+  // Lower exponent = the Math.pow(t, exponent) curve stays high (near 1,
+  // i.e. snowy) further down the cone -- more of the tree reads as covered.
+  // Pushed down to 0.15 (was 0.4) at full coverage: measured against real
+  // rendered pixels (not just the color buffer) via a real-Safari/WebKit
+  // check, 0.4 only produced a barely-noticeable tonal shift even at max
+  // coverage. t=0 (the cone's base ring) always stays pure CANOPY_GREEN
+  // regardless of exponent (pow(0, x) = 0), so this stays structurally
+  // incapable of becoming a solid white blob no matter how low this goes.
+  const exponent = THREE.MathUtils.lerp(1.6, 0.15, coverage);
+  for (let i = 0; i < heightT.length; i++) {
+    snowPaintColor.copy(CANOPY_GREEN).lerp(CANOPY_SNOW, Math.pow(heightT[i], exponent));
+    colorAttr.setXYZ(i, snowPaintColor.r, snowPaintColor.g, snowPaintColor.b);
+  }
+  colorAttr.needsUpdate = true;
 }
 
 const TIER1_R = 0.85, TIER1_H = 1.7, TIER1_BASE_Y = TRUNK_H * 0.5;
@@ -299,6 +336,19 @@ tier1Geo.translate(0, TIER1_BASE_Y + TIER1_H / 2, 0);
 const TIER2_R = 0.55, TIER2_H = 1.5, TIER2_BASE_Y = TIER1_BASE_Y + TIER1_H * 0.55;
 const tier2Geo = snowCappedCone(TIER2_R, TIER2_H, 7);
 tier2Geo.translate(0, TIER2_BASE_Y + TIER2_H / 2, 0);
+
+// Snow buildup: starts lightly dusted, gradually covers more of each
+// canopy over SNOW_BUILDUP_SPAN seconds, capped at SNOW_BUILDUP_MAX so
+// trees settle into "convincingly snow-laden" rather than becoming solid
+// white blobs.
+const SNOW_BUILDUP_START = 0.12;
+// Raised from 0.72 -- safe to push much higher than it looks, since the
+// cone's base ring is pinned to pure green by construction (see the
+// exponent comment in paintCanopySnow) regardless of how high this goes.
+const SNOW_BUILDUP_MAX   = 0.92;
+const SNOW_BUILDUP_SPAN  = 100; // seconds to go from start to max coverage
+paintCanopySnow(tier1Geo, SNOW_BUILDUP_START);
+paintCanopySnow(tier2Geo, SNOW_BUILDUP_START);
 
 const trunkMat  = new THREE.MeshStandardMaterial({ color: 0x3b2e26, roughness: 0.95 });
 const canopyMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88 });
@@ -575,11 +625,30 @@ let fpsFrames = 0, fpsAccum = 0;
 // pattern in rain.html/lava.html -- drives the snow shader's uTime, the
 // only thing in the scene that currently animates.
 const clock = new THREE.Clock();
-let simTime = 0;
+// Debug fast-forward: append ?ff=<seconds> to the URL to start simTime
+// already advanced that far, so the snow-buildup coverage (and anything
+// else driven by simTime) can be previewed at any point in its range
+// immediately, without waiting through the real multi-minute ramp. Absent
+// the param, behavior is unchanged (starts at 0 as before).
+const ffParam = parseFloat(new URLSearchParams(location.search).get('ff'));
+let simTime = Number.isFinite(ffParam) ? ffParam : 0;
+// Repainting the shared canopy gradient a few times a second (not every
+// frame) is plenty -- buildup is a slow, minutes-long drift, so there's
+// nothing to gain from doing it at 60Hz.
+const SNOW_PAINT_INTERVAL = 0.2;
+let lastSnowPaint = -Infinity;
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   simTime += dt;
   snowMat.uniforms.uTime.value = simTime;
+
+  if (simTime - lastSnowPaint >= SNOW_PAINT_INTERVAL) {
+    lastSnowPaint = simTime;
+    const coverage = SNOW_BUILDUP_START +
+      (SNOW_BUILDUP_MAX - SNOW_BUILDUP_START) * Math.min(1, simTime / SNOW_BUILDUP_SPAN);
+    paintCanopySnow(tier1Geo, coverage);
+    paintCanopySnow(tier2Geo, coverage);
+  }
 
   renderer.render(scene, camera);
 
@@ -591,7 +660,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future work ───────────────────────────────────────────
-window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, tier1Mesh, tier2Mesh, treePlacements, snow, snowMat, SNOW_COUNT };
+window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, tier1Mesh, tier2Mesh, treePlacements, snow, snowMat, SNOW_COUNT, tier1Geo, tier2Geo, paintCanopySnow, SNOW_BUILDUP_START, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN };
 </script>
 </body>
 </html>
