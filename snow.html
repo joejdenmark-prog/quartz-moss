@@ -274,57 +274,29 @@ const CANOPY_GREEN = new THREE.Color(0x44543f); // muted, cool-toned green -- ov
 const CANOPY_SNOW  = new THREE.Color(0xeef3f2); // pale snow-dusted tips
 
 // Builds the cone's base-to-tip height fraction (0 at base, 1 at tip) per
-// vertex and stashes it in userData, but doesn't paint colors yet -- that
-// happens in paintCanopySnow() below, since coverage now changes over time
-// (the snow-buildup effect) instead of being fixed at build time. Computed
-// BEFORE the cone is translated into its final stacked position, while its
-// own local Y still spans -height/2..+height/2 -- simpler than working out
-// the post-translate range.
+// vertex as a real GPU attribute (aHeightT) -- the coverage blend now runs
+// per-instance in the canopy shader (see canopyMat.onBeforeCompile below),
+// since each tree needs to be able to diverge from the others once tap-to-
+// dust-off exists, and a shared vertex-color buffer (the old approach)
+// can't represent that. Computed BEFORE the cone is translated into its
+// final stacked position, while its own local Y still spans
+// -height/2..+height/2 -- simpler than working out the post-translate range.
 function snowCappedCone(radius, height, radialSegs){
   // heightSegments=8 (not 1) is required, not cosmetic: with only one height
   // segment a cone has just two vertex rings (apex + base), so there's no
   // intermediate geometry for a coverage gradient to ever move across --
   // the "snow line" would only ever be the single apex vertex, regardless
-  // of coverage. More rings along the slant give paintCanopySnow() an
-  // actual gradient to push up/down. Still a handful of vertices per tree
-  // (shared across all instances, not duplicated), so this stays cheap.
+  // of coverage. More rings along the slant give the shader an actual
+  // gradient to push up/down. Still a handful of vertices per tree (shared
+  // across all instances, not duplicated), so this stays cheap.
   const geo = new THREE.ConeGeometry(radius, height, radialSegs, 8);
   const pos = geo.attributes.position;
   const heightT = new Float32Array(pos.count);
   for (let i = 0; i < pos.count; i++) {
     heightT[i] = THREE.MathUtils.clamp(pos.getY(i) / height + 0.5, 0, 1);
   }
-  geo.userData.heightT = heightT;
-  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(pos.count * 3), 3));
+  geo.setAttribute('aHeightT', new THREE.BufferAttribute(heightT, 1));
   return geo;
-}
-
-// Repaints a canopy geometry's shared vertex colors for a given snow
-// coverage (0..1). Both canopy tiers reuse ONE geometry across all 360 tree
-// instances via instancing, so this repaints every tree in the forest at
-// once -- cheap (a few dozen vertices) and exactly why "all trees snow up
-// together" is the simple option: it's just re-running the same base-to-tip
-// gradient this cone always had, with the green/white boundary pushed
-// further down as coverage increases, rather than needing any per-instance
-// mechanism.
-const snowPaintColor = new THREE.Color();
-function paintCanopySnow(geo, coverage){
-  const heightT = geo.userData.heightT;
-  const colorAttr = geo.attributes.color;
-  // Lower exponent = the Math.pow(t, exponent) curve stays high (near 1,
-  // i.e. snowy) further down the cone -- more of the tree reads as covered.
-  // Pushed down to 0.15 (was 0.4) at full coverage: measured against real
-  // rendered pixels (not just the color buffer) via a real-Safari/WebKit
-  // check, 0.4 only produced a barely-noticeable tonal shift even at max
-  // coverage. t=0 (the cone's base ring) always stays pure CANOPY_GREEN
-  // regardless of exponent (pow(0, x) = 0), so this stays structurally
-  // incapable of becoming a solid white blob no matter how low this goes.
-  const exponent = THREE.MathUtils.lerp(1.6, 0.15, coverage);
-  for (let i = 0; i < heightT.length; i++) {
-    snowPaintColor.copy(CANOPY_GREEN).lerp(CANOPY_SNOW, Math.pow(heightT[i], exponent));
-    colorAttr.setXYZ(i, snowPaintColor.r, snowPaintColor.g, snowPaintColor.b);
-  }
-  colorAttr.needsUpdate = true;
 }
 
 const TIER1_R = 0.85, TIER1_H = 1.7, TIER1_BASE_Y = TRUNK_H * 0.5;
@@ -340,18 +312,72 @@ tier2Geo.translate(0, TIER2_BASE_Y + TIER2_H / 2, 0);
 // Snow buildup: starts lightly dusted, gradually covers more of each
 // canopy over SNOW_BUILDUP_SPAN seconds, capped at SNOW_BUILDUP_MAX so
 // trees settle into "convincingly snow-laden" rather than becoming solid
-// white blobs.
+// white blobs. Values fed to the shader as uniforms below, not duplicated
+// as GLSL literals, so there's nothing to keep in sync by hand.
 const SNOW_BUILDUP_START = 0.12;
-// Raised from 0.72 -- safe to push much higher than it looks, since the
-// cone's base ring is pinned to pure green by construction (see the
-// exponent comment in paintCanopySnow) regardless of how high this goes.
+// Safe to push much higher than it looks, since the cone's base ring is
+// pinned to pure green by construction (pow(0, x) = 0, see the exponent
+// comment in the shader patch below) regardless of how high this goes.
 const SNOW_BUILDUP_MAX   = 0.92;
 const SNOW_BUILDUP_SPAN  = 100; // seconds to go from start to max coverage
-paintCanopySnow(tier1Geo, SNOW_BUILDUP_START);
-paintCanopySnow(tier2Geo, SNOW_BUILDUP_START);
+
+// Per-instance "last dusted" timestamp (simTime at last tap, 0 = never
+// tapped). This is the one piece of real per-tree state the tap-to-reset
+// feature needs -- everything else about a tree's snow look is still
+// computed live from this single float plus the shared uTime/geometry, so
+// adding independent per-tree timing costs one instanced float attribute,
+// not a duplicated geometry per tree. Shared between both canopy tiers (one
+// attribute object, one needsUpdate flag covers both) since a tap should
+// reset a tree's whole canopy, not just one tier.
+const resetTimeAttr = new THREE.InstancedBufferAttribute(new Float32Array(TREE_COUNT), 1);
+resetTimeAttr.setUsage(THREE.DynamicDrawUsage); // unlike instanceMatrix, this DOES get rewritten post-load, on every tap
+tier1Geo.setAttribute('aResetTime', resetTimeAttr);
+tier2Geo.setAttribute('aResetTime', resetTimeAttr);
 
 const trunkMat  = new THREE.MeshStandardMaterial({ color: 0x3b2e26, roughness: 0.95 });
-const canopyMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88 });
+const canopyMat = new THREE.MeshStandardMaterial({ roughness: 0.88 });
+// Patches the compiled shader to compute each tree's snow coverage live
+// from its own aResetTime, instead of reading a precomputed vertex color.
+// Deliberately minimal: only appends code at two standard, stable #include
+// hook points (doesn't rewrite any of three's own chunk internals), and
+// fully owns the final color via its own vSnowColor varying rather than
+// fighting with the built-in vertexColors/instanceColor pipeline.
+canopyMat.onBeforeCompile = (shader) => {
+  shader.uniforms.uTime = { value: 0 };
+  shader.uniforms.uCanopyGreen = { value: CANOPY_GREEN };
+  shader.uniforms.uCanopySnow = { value: CANOPY_SNOW };
+  shader.uniforms.uBuildupStart = { value: SNOW_BUILDUP_START };
+  shader.uniforms.uBuildupMax = { value: SNOW_BUILDUP_MAX };
+  shader.uniforms.uBuildupSpan = { value: SNOW_BUILDUP_SPAN };
+
+  shader.vertexShader = `
+    attribute float aHeightT;
+    attribute float aResetTime;
+    uniform float uTime, uBuildupStart, uBuildupMax, uBuildupSpan;
+    uniform vec3 uCanopyGreen, uCanopySnow;
+    varying vec3 vSnowColor;
+  ` + shader.vertexShader.replace('#include <color_vertex>', `
+    #include <color_vertex>
+    {
+      float elapsed = max(uTime - aResetTime, 0.0);
+      float coverage = uBuildupStart + (uBuildupMax - uBuildupStart) * min(1.0, elapsed / uBuildupSpan);
+      // Lower exponent = the pow(t, exponent) curve stays high (near 1, i.e.
+      // snowy) further down the cone -- more of the tree reads as covered.
+      float exponent = mix(1.6, 0.15, coverage);
+      vec3 snowColor = mix(uCanopyGreen, uCanopySnow, pow(aHeightT, exponent));
+      #ifdef USE_INSTANCING_COLOR
+        snowColor *= instanceColor.rgb;
+      #endif
+      vSnowColor = snowColor;
+    }
+  `);
+  shader.fragmentShader = `varying vec3 vSnowColor;\n` +
+    shader.fragmentShader.replace('#include <color_fragment>', `
+    #include <color_fragment>
+    diffuseColor.rgb = vSnowColor;
+  `);
+  canopyMat.userData.shader = shader;
+};
 
 const trunkMesh = new THREE.InstancedMesh(trunkGeo, trunkMat, TREE_COUNT);
 const tier1Mesh = new THREE.InstancedMesh(tier1Geo, canopyMat, TREE_COUNT);
@@ -616,6 +642,132 @@ const snow = new THREE.Points(snowGeo, snowMat);
 snow.frustumCulled = false;
 scene.add(snow);
 
+// ── Tap-to-dust-off ───────────────────────────────────────────────────────────
+// Tapping a tree resets its aResetTime (see canopyMat.onBeforeCompile above)
+// so its own coverage curve restarts, independently of every other tree,
+// plus a brief particle burst at the tap point to sell "snow flicking off
+// branches". The burst is a small fixed pool of points recycled round-robin
+// across taps -- taps are rare, human-paced events, so there's no need for
+// the "thousands of particles" GPU-only discipline the falling snow needed;
+// a tiny CPU write of a few dozen values per tap is negligible.
+const DUST_PER_TAP = 36;
+const DUST_MAX_CONCURRENT = 4; // a handful of taps in quick succession can be in flight at once without visibly stealing each other's particles
+const DUST_COUNT = DUST_PER_TAP * DUST_MAX_CONCURRENT;
+const DUST_DURATION = 0.9; // seconds -- brief, per the brief's "keep it brief"
+
+const dustOrigins = new Float32Array(DUST_COUNT * 3);
+const dustVel = new Float32Array(DUST_COUNT * 3);
+const dustSize = new Float32Array(DUST_COUNT);
+// Very negative, not 0 -- with aStartTime=0, a fresh page load (uTime≈0)
+// would read as "mid-burst at t≈0" and every dust slot would flash visible
+// at the origin the instant the scene loads. This keeps every slot's
+// elapsed time (uTime - aStartTime) enormous, and therefore invisible
+// (past uDustDuration), until an actual tap writes a real start time.
+const DUST_INACTIVE_START = -1e6;
+const dustStart = new Float32Array(DUST_COUNT).fill(DUST_INACTIVE_START);
+for (let i = 0; i < DUST_COUNT; i++) {
+  // Rough upward+outward pop, like snow flicking off a tapped branch --
+  // randomized once per pool slot; reused each time that slot is recycled,
+  // which reads as fine natural variation given taps are infrequent.
+  const theta = rng() * Math.PI * 2;
+  const speedXZ = range(0.6, 2.2);
+  dustVel[i*3+0] = Math.cos(theta) * speedXZ;
+  dustVel[i*3+1] = range(0.8, 2.6);
+  dustVel[i*3+2] = Math.sin(theta) * speedXZ;
+  dustSize[i] = range(2.0, 4.5);
+}
+const dustGeo = new THREE.BufferGeometry();
+const dustPosAttr = new THREE.BufferAttribute(dustOrigins, 3);
+const dustStartAttr = new THREE.BufferAttribute(dustStart, 1);
+dustPosAttr.setUsage(THREE.DynamicDrawUsage);
+dustStartAttr.setUsage(THREE.DynamicDrawUsage);
+dustGeo.setAttribute('position', dustPosAttr);
+dustGeo.setAttribute('aVel', new THREE.BufferAttribute(dustVel, 3));
+dustGeo.setAttribute('aStartTime', dustStartAttr);
+dustGeo.setAttribute('aSize', new THREE.BufferAttribute(dustSize, 1));
+
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uDuration: { value: DUST_DURATION },
+    uPixelRatio: { value: renderer.getPixelRatio() },
+  },
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    attribute vec3 aVel;
+    attribute float aStartTime;
+    attribute float aSize;
+    uniform float uTime, uDuration, uPixelRatio;
+    varying float vAlpha;
+    void main(){
+      float t = uTime - aStartTime;
+      vec3 pos = position;
+      float alpha = 0.0;
+      if (t >= 0.0 && t < uDuration) {
+        vec3 gravity = vec3(0.0, -9.0, 0.0);
+        pos = position + aVel * t + 0.5 * gravity * t * t;
+        float fadeIn = smoothstep(0.0, uDuration * 0.08, t);
+        float fadeOut = 1.0 - smoothstep(uDuration * 0.45, uDuration, t);
+        alpha = fadeIn * fadeOut;
+      }
+      vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+      gl_Position = projectionMatrix * mvPosition;
+      float dist = -mvPosition.z;
+      gl_PointSize = clamp(aSize * uPixelRatio * (50.0 / max(dist, 3.0)), 1.0, 30.0);
+      vAlpha = alpha;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+      float d = length(uv) * 2.0;
+      float shape = smoothstep(1.0, 0.35, d);
+      if (shape < 0.01) discard;
+      gl_FragColor = vec4(1.0, 1.0, 1.0, shape * vAlpha * 0.9);
+    }
+  `,
+});
+const dust = new THREE.Points(dustGeo, dustMat);
+dust.frustumCulled = false; // same reasoning as `snow` above -- shader-displaced positions aren't reflected in the geometry's static bounding sphere
+scene.add(dust);
+
+let dustCursor = 0;
+function spawnDustBurst(originPoint){
+  for (let k = 0; k < DUST_PER_TAP; k++){
+    const j = dustCursor;
+    dustCursor = (dustCursor + 1) % DUST_COUNT;
+    dustPosAttr.setXYZ(j, originPoint.x, originPoint.y, originPoint.z);
+    dustStartAttr.setX(j, simTime);
+  }
+  dustPosAttr.needsUpdate = true;
+  dustStartAttr.needsUpdate = true;
+}
+
+// Raycast against the two canopy InstancedMeshes (three.js raycaster
+// natively resolves instanceId on InstancedMesh hits) to find which tree,
+// if any, was tapped. pointerdown (not click) for lower touch latency and
+// because it pairs naturally with the canvas's existing touch-action:none.
+const tapRaycaster = new THREE.Raycaster();
+const tapNDC = new THREE.Vector2();
+function handleTap(clientX, clientY){
+  const rect = canvas.getBoundingClientRect();
+  tapNDC.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  tapNDC.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  tapRaycaster.setFromCamera(tapNDC, camera);
+  const hits = tapRaycaster.intersectObjects([tier1Mesh, tier2Mesh], false);
+  if (!hits.length) return null;
+  const hit = hits[0];
+  const i = hit.instanceId;
+  if (i == null || i >= treePlacements.length) return null;
+  resetTimeAttr.array[i] = simTime;
+  resetTimeAttr.needsUpdate = true;
+  spawnDustBurst(hit.point);
+  return i;
+}
+canvas.addEventListener('pointerdown', (e) => { handleTap(e.clientX, e.clientY); });
+
 // ── FPS readout ───────────────────────────────────────────────────────────────
 const fpsEl = document.getElementById('fps');
 let fpsFrames = 0, fpsAccum = 0;
@@ -632,23 +784,15 @@ const clock = new THREE.Clock();
 // the param, behavior is unchanged (starts at 0 as before).
 const ffParam = parseFloat(new URLSearchParams(location.search).get('ff'));
 let simTime = Number.isFinite(ffParam) ? ffParam : 0;
-// Repainting the shared canopy gradient a few times a second (not every
-// frame) is plenty -- buildup is a slow, minutes-long drift, so there's
-// nothing to gain from doing it at 60Hz.
-const SNOW_PAINT_INTERVAL = 0.2;
-let lastSnowPaint = -Infinity;
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   simTime += dt;
   snowMat.uniforms.uTime.value = simTime;
-
-  if (simTime - lastSnowPaint >= SNOW_PAINT_INTERVAL) {
-    lastSnowPaint = simTime;
-    const coverage = SNOW_BUILDUP_START +
-      (SNOW_BUILDUP_MAX - SNOW_BUILDUP_START) * Math.min(1, simTime / SNOW_BUILDUP_SPAN);
-    paintCanopySnow(tier1Geo, coverage);
-    paintCanopySnow(tier2Geo, coverage);
-  }
+  dustMat.uniforms.uTime.value = simTime;
+  // canopyMat's shader uniforms only exist once WebGL has actually compiled
+  // the patched shader (onBeforeCompile runs on first use) -- guard for the
+  // very first frame(s) before that's happened.
+  if (canopyMat.userData.shader) canopyMat.userData.shader.uniforms.uTime.value = simTime;
 
   renderer.render(scene, camera);
 
@@ -660,7 +804,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future work ───────────────────────────────────────────
-window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, tier1Mesh, tier2Mesh, treePlacements, snow, snowMat, SNOW_COUNT, tier1Geo, tier2Geo, paintCanopySnow, SNOW_BUILDUP_START, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN };
+window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, tier1Mesh, tier2Mesh, treePlacements, snow, snowMat, SNOW_COUNT, tier1Geo, tier2Geo, canopyMat, resetTimeAttr, SNOW_BUILDUP_START, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, get simTime(){ return simTime; } };
 </script>
 </body>
 </html>
