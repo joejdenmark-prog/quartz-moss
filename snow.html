@@ -812,11 +812,12 @@ function applyTap(i, now){
 
   const current = coverageNow(i, now);
   if (state.tapsRemaining <= 0) {
-    if (current <= 0) return false; // bare tree -- tapping does nothing, no cooldown consumed either
+    const frac = current / SNOW_BUILDUP_MAX;
+    if (frac <= 0.15) return false; // 0-15%: tapping does nothing, no cooldown consumed either
     // Tap tier + per-tap removal are fixed from coverage AT THIS FIRST TAP
     // of the sequence; later taps in the same sequence reuse this same
     // perTapRemoval even as natural buildup keeps nudging live coverage up.
-    const frac = current / SNOW_BUILDUP_MAX;
+    // 15-33%: 1 tap, 33-66%: 2 taps, 66-100%: 3 taps.
     const requiredTaps = frac > 2/3 ? 3 : frac > 1/3 ? 2 : 1;
     state.tapsRemaining = requiredTaps;
     state.perTapRemoval = current / requiredTaps;
