@@ -226,14 +226,18 @@ const ground = new THREE.Mesh(groundGeo, groundMat);
 scene.add(ground);
 
 // ── Trees ─────────────────────────────────────────────────────────────────────
-// One tree = one trunk (cylinder) + two stacked canopy cones (a wider, lower
-// tier and a narrower, higher one) for a simple tapered-conifer silhouette.
-// Each part is its own InstancedMesh shared across every tree in the forest,
-// so the whole forest costs exactly 3 draw calls total regardless of tree
-// count — the "instanced if placing many of the same tree" from the brief.
-// Geometry itself is deliberately low-poly (6-7 radial segments): at the
-// size these render on screen the facets aren't very visible, and it keeps
-// the vertex count trivial for mobile.
+// The canopy is a small cluster of flat, alpha-blended "needle clump" cards
+// per tree, arranged in a rough conical taper (wide/low near the trunk,
+// narrow/high at the tip) -- replaces the earlier smooth-cone canopy after
+// a separate cheap-prototype comparison (see snow-foliage-test.html) showed
+// it read as more convincing foliage at effectively the same cost. All
+// cards across the whole forest share ONE geometry + ONE material + ONE
+// InstancedMesh, so canopy draw-call count is 1 regardless of tree count.
+// Cards are NOT true per-frame camera-facing billboards -- this scene's
+// camera never moves, so each card's orientation is just baked in once
+// (radially outward from the trunk axis, with a bit of individual tilt)
+// with DoubleSide rendering as a cheap substitute, rather than paying for
+// billboard matrix math in the vertex shader for no real benefit here.
 const TREE_COUNT = 360;
 
 const TRUNK_H = 1.6, TRUNK_R_TOP = 0.09, TRUNK_R_BOTTOM = 0.14;
@@ -243,75 +247,207 @@ trunkGeo.translate(0, TRUNK_H / 2, 0); // base sits at local y=0 so it starts ri
 const CANOPY_GREEN = new THREE.Color(0x44543f); // muted, cool-toned green -- overcast winter light, not a saturated summer green
 const CANOPY_SNOW  = new THREE.Color(0xeef3f2); // pale snow-dusted tips
 
-// Builds the cone's base-to-tip height fraction (0 at base, 1 at tip) per
-// vertex as a real GPU attribute (aHeightT) -- the coverage blend now runs
-// per-instance in the canopy shader (see canopyMat.onBeforeCompile below),
-// since each tree needs to be able to diverge from the others once tap-to-
-// dust-off exists, and a shared vertex-color buffer (the old approach)
-// can't represent that. Computed BEFORE the cone is translated into its
-// final stacked position, while its own local Y still spans
-// -height/2..+height/2 -- simpler than working out the post-translate range.
-function snowCappedCone(radius, height, radialSegs){
-  // heightSegments=8 (not 1) is required, not cosmetic: with only one height
-  // segment a cone has just two vertex rings (apex + base), so there's no
-  // intermediate geometry for a coverage gradient to ever move across --
-  // the "snow line" would only ever be the single apex vertex, regardless
-  // of coverage. More rings along the slant give the shader an actual
-  // gradient to push up/down. Still a handful of vertices per tree (shared
-  // across all instances, not duplicated), so this stays cheap.
-  const geo = new THREE.ConeGeometry(radius, height, radialSegs, 8);
-  const pos = geo.attributes.position;
-  const heightT = new Float32Array(pos.count);
-  for (let i = 0; i < pos.count; i++) {
-    heightT[i] = THREE.MathUtils.clamp(pos.getY(i) / height + 0.5, 0, 1);
-  }
-  geo.setAttribute('aHeightT', new THREE.BufferAttribute(heightT, 1));
-  return geo;
-}
-
+// Same overall canopy envelope the earlier two-tier cones used, kept only
+// as reference dimensions for scattering card slots through -- there's no
+// cone geometry being built from these any more.
 const TIER1_R = 0.85, TIER1_H = 1.7, TIER1_BASE_Y = TRUNK_H * 0.5;
-const tier1Geo = snowCappedCone(TIER1_R, TIER1_H, 7);
-tier1Geo.translate(0, TIER1_BASE_Y + TIER1_H / 2, 0);
-
-// Tiers overlap a bit (0.55 instead of 1.0) so the canopy reads as one
-// continuous tapered shape rather than two separate cones with a visible gap.
 const TIER2_R = 0.55, TIER2_H = 1.5, TIER2_BASE_Y = TIER1_BASE_Y + TIER1_H * 0.55;
-const tier2Geo = snowCappedCone(TIER2_R, TIER2_H, 7);
-tier2Geo.translate(0, TIER2_BASE_Y + TIER2_H / 2, 0);
+const CANOPY_Y_BOTTOM = TIER1_BASE_Y;
+const CANOPY_Y_TOP = TIER2_BASE_Y + TIER2_H;
+const CANOPY_Y_SPAN = CANOPY_Y_TOP - CANOPY_Y_BOTTOM;
+
+// Card "slots": one shared layout reused by every tree (like the old cone
+// geometry was identical for every tree) -- randomized once at load via the
+// same seeded rng as everything else, not per-tree, so this stays a single
+// small array rather than 360 separate layouts.
+const CARD_BANDS = [
+  { yFrac: 0.06, radius: TIER1_R * 0.95, count: 10 },
+  { yFrac: 0.22, radius: TIER1_R * 0.80, count: 9 },
+  { yFrac: 0.38, radius: TIER1_R * 0.60, count: 8 },
+  { yFrac: 0.55, radius: TIER2_R * 0.90, count: 7 },
+  { yFrac: 0.72, radius: TIER2_R * 0.60, count: 5 },
+  { yFrac: 0.90, radius: TIER2_R * 0.25, count: 4 },
+];
+const CARD_SLOTS = [];
+for (const band of CARD_BANDS) {
+  for (let k = 0; k < band.count; k++) {
+    const angle = (k / band.count) * Math.PI * 2 + range(-0.3, 0.3);
+    const y = CANOPY_Y_BOTTOM + band.yFrac * CANOPY_Y_SPAN + range(-0.05, 0.05);
+    const r = band.radius * range(0.85, 1.15);
+    // Sized against the vertical gap between bands (not the whole canopy
+    // radius) -- modest, roughly clump-sized absolute dimensions, small and
+    // numerous enough to overlap into continuous-looking foliage.
+    const w = range(0.22, 0.36);
+    const h = range(0.20, 0.32);
+    // Small random lean/roll per card (not just the shared yaw below) --
+    // uniform flat cards all tilted identically within a band read as
+    // repeated stickers; a bit of individual tilt variety breaks that up.
+    const tiltX = range(-0.3, 0.3);
+    const tiltZ = range(-0.25, 0.25);
+    CARD_SLOTS.push({ y, angle, r, w, h, tiltX, tiltZ, heightT: band.yFrac });
+  }
+}
+const CARDS_PER_TREE = CARD_SLOTS.length; // 43
+
+// Local (tree-space) transform for each slot, shared across every tree --
+// composed with each tree's own placement matrix at instance-build time.
+const slotDummy = new THREE.Object3D();
+const CARD_SLOT_MATRICES = CARD_SLOTS.map(s => {
+  slotDummy.position.set(Math.cos(s.angle) * s.r, s.y, Math.sin(s.angle) * s.r);
+  slotDummy.rotation.set(s.tiltX, s.angle, s.tiltZ); // radially outward (yaw) plus a small individual lean/roll
+  slotDummy.scale.set(s.w, s.h, 1);
+  slotDummy.updateMatrix();
+  return slotDummy.matrix.clone();
+});
+
+// Needle-clump silhouette: soft radial-gradient blobs (fade to zero alpha
+// at the edge, rather than a hard-edged fill) so real alpha blending can
+// genuinely feather each card into whatever's behind it, plus needle
+// strokes poking past the blob extent for a spiky rather than smooth edge,
+// and a few soft holes punched through so the interior isn't one solid
+// mass. Blobs/strokes are painted in varying gray levels (not flat white)
+// -- the shader multiplies the snow-coverage color by this grayscale value
+// (see the fragment patch below) instead of replacing it outright, so each
+// card gets real internal tonal variation instead of one flat color.
+function makeNeedleClusterTexture(size){
+  const cnv = document.createElement('canvas');
+  cnv.width = cnv.height = size;
+  const ctx = cnv.getContext('2d');
+  const baseX = size * 0.5, baseY = size * 0.95;
+
+  const blobCount = 16;
+  for (let i = 0; i < blobCount; i++) {
+    const bx = baseX + range(-size * 0.32, size * 0.32);
+    const by = baseY - range(size * 0.1, size * 0.65);
+    const r = range(size * 0.1, size * 0.22);
+    const gray = Math.round(range(170, 255));
+    const grad = ctx.createRadialGradient(bx, by, 0, bx, by, r);
+    grad.addColorStop(0, `rgba(${gray},${gray},${gray},${range(0.75, 0.95)})`);
+    grad.addColorStop(0.6, `rgba(${gray},${gray},${gray},${range(0.4, 0.6)})`);
+    grad.addColorStop(1, `rgba(${gray},${gray},${gray},0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(bx, by, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.lineCap = 'round';
+  const bladeCount = 46;
+  for (let i = 0; i < bladeCount; i++) {
+    const angle = range(-1.2, 1.2) - Math.PI / 2; // fans upward, wide around straight-up; some poke past the blobs' extent for a spiky rather than smooth edge
+    const len = range(size * 0.28, size * 0.85);
+    const tipX = baseX + Math.cos(angle) * len;
+    const tipY = baseY + Math.sin(angle) * len;
+    const midX = (baseX + tipX) / 2 + range(-size * 0.06, size * 0.06);
+    const midY = (baseY + tipY) / 2;
+    const gray = Math.round(range(190, 255));
+    ctx.strokeStyle = `rgba(${gray},${gray},${gray},${range(0.5, 0.95)})`;
+    ctx.lineWidth = range(size * 0.012, size * 0.03);
+    ctx.beginPath();
+    ctx.moveTo(baseX, baseY);
+    ctx.quadraticCurveTo(midX, midY, tipX, tipY);
+    ctx.stroke();
+  }
+
+  // Soft holes punched through the cluster body -- breaks up what would
+  // otherwise be one continuous filled mass in the middle.
+  ctx.globalCompositeOperation = 'destination-out';
+  for (let i = 0; i < 6; i++) {
+    const hx = baseX + range(-size * 0.28, size * 0.28);
+    const hy = baseY - range(size * 0.15, size * 0.55);
+    const hr = range(size * 0.04, size * 0.09);
+    const grad = ctx.createRadialGradient(hx, hy, 0, hx, hy, hr);
+    grad.addColorStop(0, 'rgba(255,255,255,0.65)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(hx, hy, hr, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+
+  const tex = new THREE.CanvasTexture(cnv);
+  return tex;
+}
+const needleTex = makeNeedleClusterTexture(128);
+
+// Card base geometry: a unit plane with its pivot moved to the bottom edge
+// (translate +0.5 in Y) so it "grows up" from its slot anchor point, the
+// same way the old cone geometries were translated to sit correctly.
+const cardGeo = new THREE.PlaneGeometry(1, 1);
+cardGeo.translate(0, 0.5, 0);
+
+// aHeightT: fixed per card slot (which height band it's in), not per-vertex
+// like the old cone gradient -- a single flat card only needs one coverage
+// level, not a continuous gradient across its own small area.
+const cardHeightTArr = new Float32Array(TREE_COUNT * CARDS_PER_TREE);
+// aResetTime: per-CARD mirror of the per-TREE resetTimeAttr below (every
+// card belonging to tree i always holds the same value as resetTimeAttr[i]
+// -- see writeTreeResetTime()). Needed because InstancedBufferAttribute is
+// indexed per-instance (per-card here), not per-tree.
+const cardResetTimeArr = new Float32Array(TREE_COUNT * CARDS_PER_TREE);
+// Per-CARD brightness jitter (independent of the per-TREE instanceColor
+// tint) -- without this, every card in the same height band on the same
+// tree is IDENTICAL in color (same heightT, same tree tint), which reads
+// as repeated stamped stickers rather than naturally varied foliage.
+const cardTintArr = new Float32Array(TREE_COUNT * CARDS_PER_TREE);
+const cardHeightTAttr = new THREE.InstancedBufferAttribute(cardHeightTArr, 1);
+const cardResetTimeAttr = new THREE.InstancedBufferAttribute(cardResetTimeArr, 1);
+const cardTintAttr = new THREE.InstancedBufferAttribute(cardTintArr, 1);
+cardResetTimeAttr.setUsage(THREE.DynamicDrawUsage); // unlike instanceMatrix, this DOES get rewritten post-load, on every tap
+cardGeo.setAttribute('aHeightT', cardHeightTAttr);
+cardGeo.setAttribute('aResetTime', cardResetTimeAttr);
+cardGeo.setAttribute('aCardTint', cardTintAttr);
 
 // Snow buildup: starts bare, gradually covers more of each canopy over
 // SNOW_BUILDUP_SPAN seconds, capped at SNOW_BUILDUP_MAX so trees settle
 // into "convincingly snow-laden" rather than becoming solid white blobs.
 // Values fed to the shader as uniforms below, not duplicated as GLSL
 // literals, so there's nothing to keep in sync by hand.
-// Safe to push much higher than it looks, since the cone's base ring is
-// pinned to pure green by construction (pow(0, x) = 0, see the exponent
-// comment in the shader patch below) regardless of how high this goes.
 const SNOW_BUILDUP_MAX   = 0.92;
 const SNOW_BUILDUP_SPAN  = 15; // seconds to go from start to max coverage
 
-// Per-instance "last dusted" timestamp (simTime at last tap, 0 = never
-// tapped). This is the one piece of real per-tree state the tap-to-reset
-// feature needs -- everything else about a tree's snow look is still
-// computed live from this single float plus the shared uTime/geometry, so
-// adding independent per-tree timing costs one instanced float attribute,
-// not a duplicated geometry per tree. Shared between both canopy tiers (one
-// attribute object, one needsUpdate flag covers both) since a tap should
-// reset a tree's whole canopy, not just one tier.
-const resetTimeAttr = new THREE.InstancedBufferAttribute(new Float32Array(TREE_COUNT), 1);
-resetTimeAttr.setUsage(THREE.DynamicDrawUsage); // unlike instanceMatrix, this DOES get rewritten post-load, on every tap
-tier1Geo.setAttribute('aResetTime', resetTimeAttr);
-tier2Geo.setAttribute('aResetTime', resetTimeAttr);
+// Per-tree "last dusted" timestamp (simTime at last tap, 0 = never tapped).
+// This is the one piece of real per-tree state the tap-to-reset feature
+// needs -- everything else about a tree's snow look is still computed live
+// from this single float plus the shared uTime/geometry. Plain JS-side
+// bookkeeping now (not a GPU attribute directly) since with many cards per
+// tree, the GPU-facing copy has to be mirrored across all of that tree's
+// card instances anyway -- see writeTreeResetTime() and cardResetTimeAttr
+// above, which is the actual attribute the shader reads.
+const resetTimeAttr = new Float32Array(TREE_COUNT);
 
-const trunkMat  = new THREE.MeshStandardMaterial({ color: 0x3b2e26, roughness: 0.95 });
-const canopyMat = new THREE.MeshStandardMaterial({ roughness: 0.88 });
+const trunkMat = new THREE.MeshStandardMaterial({ color: 0x3b2e26, roughness: 0.95 });
+
+// Real alpha blending (not alphaTest) after a live A/B check: alphaTest is
+// a binary keep/discard per pixel, so no matter how gradual the texture's
+// alpha ramp is, the rendered edge is always a hard cutoff -- that's the
+// structural reason an earlier alphaTest-based version of these cards kept
+// reading as distinct "blobs" even after softening the texture itself.
+// Real transparency lets edges genuinely fade into whatever's behind them.
+// Trade-off, worth watching for on real hardware: three.js does not depth-
+// sort individual instances WITHIN one InstancedMesh, so overlapping
+// blended cards could occasionally show a sorting artifact (the "wrong"
+// card rendering on top) -- unlike alphaTest, which had no sorting
+// concerns at all since it's opaque+discard, not blended.
+const cardMat = new THREE.MeshStandardMaterial({
+  map: needleTex,
+  transparent: true,
+  depthWrite: false,
+  roughness: 0.85,
+  side: THREE.DoubleSide, // cards aren't true billboards, so both faces need to shade correctly from any angle
+});
 // Patches the compiled shader to compute each tree's snow coverage live
 // from its own aResetTime, instead of reading a precomputed vertex color.
-// Deliberately minimal: only appends code at two standard, stable #include
+// Deliberately minimal: only appends code at standard, stable #include
 // hook points (doesn't rewrite any of three's own chunk internals), and
 // fully owns the final color via its own vSnowColor varying rather than
-// fighting with the built-in vertexColors/instanceColor pipeline.
-canopyMat.onBeforeCompile = (shader) => {
+// fighting with the built-in vertexColors/instanceColor pipeline. The
+// fragment stage multiplies by the sampled texture's own grayscale value
+// (vTexLum) instead of fully replacing diffuseColor -- that's what lets
+// the texture's internal shading variation actually show up, rather than
+// every card being one flat, uniformly-colored cutout shape.
+cardMat.onBeforeCompile = (shader) => {
   shader.uniforms.uTime = { value: 0 };
   shader.uniforms.uCanopyGreen = { value: CANOPY_GREEN };
   shader.uniforms.uCanopySnow = { value: CANOPY_SNOW };
@@ -321,6 +457,7 @@ canopyMat.onBeforeCompile = (shader) => {
   shader.vertexShader = `
     attribute float aHeightT;
     attribute float aResetTime;
+    attribute float aCardTint;
     uniform float uTime, uBuildupMax, uBuildupSpan;
     uniform vec3 uCanopyGreen, uCanopySnow;
     varying vec3 vSnowColor;
@@ -343,28 +480,37 @@ canopyMat.onBeforeCompile = (shader) => {
       // (apex included) when coverage is zero, while still reproducing
       // the exact previously-tuned look once elapsedNorm reaches 1.
       float blend = pow(aHeightT, exponent) * elapsedNorm;
-      vec3 snowColor = mix(uCanopyGreen, uCanopySnow, blend);
+      vec3 snowColor = mix(uCanopyGreen, uCanopySnow, blend) * aCardTint;
       #ifdef USE_INSTANCING_COLOR
         snowColor *= instanceColor.rgb;
       #endif
       vSnowColor = snowColor;
     }
   `);
-  shader.fragmentShader = `varying vec3 vSnowColor;\n` +
-    shader.fragmentShader.replace('#include <color_fragment>', `
-    #include <color_fragment>
-    diffuseColor.rgb = vSnowColor;
-  `);
-  canopyMat.userData.shader = shader;
+  shader.fragmentShader = `varying vec3 vSnowColor;\nfloat vTexLum;\n` +
+    shader.fragmentShader
+      .replace('#include <map_fragment>', `
+      #include <map_fragment>
+      vTexLum = diffuseColor.r;
+      `)
+      .replace('#include <color_fragment>', `
+      #include <color_fragment>
+      diffuseColor.rgb = vSnowColor * vTexLum;
+      `);
+  cardMat.userData.shader = shader;
 };
 
 const trunkMesh = new THREE.InstancedMesh(trunkGeo, trunkMat, TREE_COUNT);
-const tier1Mesh = new THREE.InstancedMesh(tier1Geo, canopyMat, TREE_COUNT);
-const tier2Mesh = new THREE.InstancedMesh(tier2Geo, canopyMat, TREE_COUNT);
+const CARD_TOTAL = TREE_COUNT * CARDS_PER_TREE;
+const cardMesh = new THREE.InstancedMesh(cardGeo, cardMat, CARD_TOTAL);
 // Trees never move in this stage (no wind/interaction yet), so StaticDrawUsage
 // is the correct hint — lets the driver put the instance buffers somewhere
 // it wouldn't bother to for data it expects to be rewritten every frame.
-[trunkMesh, tier1Mesh, tier2Mesh].forEach(m => m.instanceMatrix.setUsage(THREE.StaticDrawUsage));
+trunkMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+// Card instance matrices DO get rewritten (the dusting-shake effect below
+// rewrites them for whichever trees are actively shaking), so
+// DynamicDrawUsage here -- unlike the trunk's fully-static instanceMatrix.
+cardMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 
 // Scattered with simple rejection sampling (reject a candidate if it lands
 // too close to an already-placed tree) for a natural, non-overlapping
@@ -411,8 +557,19 @@ const treePlacements = scatterTrees(TREE_COUNT);
 // than just "the same tree but bigger".
 const HEIGHT_MULT = 1.65;
 
+// Per-tree transform WITHOUT rotationY, used only for card instancing --
+// cards ignore the trunk's own random yaw (their local slot angles are
+// already randomized in CARD_SLOTS, and un-rotating them here avoids
+// needing to account for tree rotation in the billboard-substitute facing
+// math). Trunk keeps its own randomized rotation via `dummy` below, since
+// that doesn't affect a plain cylinder's silhouette anyway. Also reused by
+// the dusting-shake effect (see updateShakes below) as the resting pose to
+// rotate away from.
+const cardTreeMatrices = new Array(treePlacements.length);
+
 const dummy = new THREE.Object3D();
 const tint = new THREE.Color();
+const _finalMat = new THREE.Matrix4();
 for (let i = 0; i < treePlacements.length; i++) {
   const { x, z } = treePlacements[i];
   // Size varies independently of distance (real forests mix tree sizes at
@@ -425,33 +582,38 @@ for (let i = 0; i < treePlacements.length; i++) {
   dummy.rotation.set(0, rotY, 0);
   dummy.scale.set(scale, scale * HEIGHT_MULT, scale);
   dummy.updateMatrix();
-
-  // Trunk and both canopy tiers share this exact matrix -- their relative
-  // heights are already baked into each geometry (see the translate() calls
-  // above), so one shared transform keeps all three parts of a tree
-  // perfectly aligned without extra per-part math.
   trunkMesh.setMatrixAt(i, dummy.matrix);
-  tier1Mesh.setMatrixAt(i, dummy.matrix);
-  tier2Mesh.setMatrixAt(i, dummy.matrix);
 
-  // Subtle per-tree color jitter (multiplies with each cone's own
-  // base-to-tip vertex color) so the forest isn't visibly stamped from one
+  dummy.rotation.set(0, 0, 0);
+  dummy.updateMatrix();
+  cardTreeMatrices[i] = dummy.matrix.clone();
+
+  // Subtle per-tree color jitter (multiplies with each card's own
+  // snow-coverage color) so the forest isn't visibly stamped from one
   // identical tree.
   tint.setHSL(0.32 + range(-0.03, 0.03), 0.18 + range(-0.06, 0.06), 0.92 + range(-0.06, 0.04));
-  tier1Mesh.setColorAt(i, tint);
-  tier2Mesh.setColorAt(i, tint);
+
+  for (let j = 0; j < CARDS_PER_TREE; j++) {
+    const instIdx = i * CARDS_PER_TREE + j;
+    _finalMat.multiplyMatrices(cardTreeMatrices[i], CARD_SLOT_MATRICES[j]);
+    cardMesh.setMatrixAt(instIdx, _finalMat);
+    cardMesh.setColorAt(instIdx, tint);
+    cardHeightTArr[instIdx] = CARD_SLOTS[j].heightT;
+    cardTintArr[instIdx] = range(0.78, 1.18);
+  }
 }
 // Placements can land short of TREE_COUNT if the field fills up before
 // maxAttempts runs out; only the instances actually written above should
 // draw, so the instanced mesh count is trimmed to what was really placed.
-[trunkMesh, tier1Mesh, tier2Mesh].forEach(m => { m.count = treePlacements.length; });
+trunkMesh.count = treePlacements.length;
+cardMesh.count = treePlacements.length * CARDS_PER_TREE;
 trunkMesh.instanceMatrix.needsUpdate = true;
-tier1Mesh.instanceMatrix.needsUpdate = true;
-tier2Mesh.instanceMatrix.needsUpdate = true;
-tier1Mesh.instanceColor.needsUpdate = true;
-tier2Mesh.instanceColor.needsUpdate = true;
+cardMesh.instanceMatrix.needsUpdate = true;
+cardMesh.instanceColor.needsUpdate = true;
+cardHeightTAttr.needsUpdate = true;
+cardTintAttr.needsUpdate = true;
 
-scene.add(trunkMesh, tier1Mesh, tier2Mesh);
+scene.add(trunkMesh, cardMesh);
 
 // ── Falling snow ──────────────────────────────────────────────────────────────
 // Every particle's position is a closed-form function of uTime (straight
@@ -622,7 +784,7 @@ snow.frustumCulled = false;
 scene.add(snow);
 
 // ── Tap-to-dust-off ───────────────────────────────────────────────────────────
-// Tapping a tree resets its aResetTime (see canopyMat.onBeforeCompile above)
+// Tapping a tree resets its aResetTime (see cardMat.onBeforeCompile above)
 // so its own coverage curve restarts, independently of every other tree,
 // plus a brief particle burst at the tap point to sell "snow flicking off
 // branches". The burst is a small fixed pool of points recycled round-robin
@@ -735,16 +897,26 @@ function spawnDustBurst(originPoint){
 // now, i.e. "make coverage 0 right now"), just solved for an arbitrary
 // target level instead of only 0. The shader needs zero new code for this;
 // only the JS deciding what number to write changes.
-const TAP_COOLDOWN = 0.8; // seconds -- per tree, shared across both canopy tiers (one tapState per tree index, since a tap on either tier counts as tapping the whole tree)
+const TAP_COOLDOWN = 0.8; // seconds -- per tree (one tapState per tree index, since a tap on any of that tree's cards counts as tapping the whole tree)
 const TAP_FADE_DURATION = 0.25; // seconds -- how long a single tap's removal takes to visibly settle, rather than snapping instantly
 const tapState = new Array(treePlacements.length).fill(null); // lazily created per tree on first tap: { tapsRemaining, perTapRemoval, lastTapTime }
 
-// Mirrors the shader's coverage formula exactly (see canopyMat.onBeforeCompile)
+// Mirrors the shader's coverage formula exactly (see cardMat.onBeforeCompile)
 // -- must stay in sync if that formula ever changes.
 function coverageNow(i, now){
-  const elapsed = Math.max(0, now - resetTimeAttr.array[i]);
+  const elapsed = Math.max(0, now - resetTimeAttr[i]);
   const elapsedNorm = Math.min(1, elapsed / SNOW_BUILDUP_SPAN);
   return SNOW_BUILDUP_MAX * elapsedNorm;
+}
+
+// Writes a tree's resetTime AND mirrors it into every one of that tree's
+// card instances -- resetTimeAttr stays the single source of truth for JS-
+// side coverage bookkeeping (coverageNow/applyTap), cardResetTimeAttr is
+// purely the GPU-facing copy the shader actually reads.
+function writeTreeResetTime(i, value){
+  resetTimeAttr[i] = value;
+  const base = i * CARDS_PER_TREE;
+  for (let j = 0; j < CARDS_PER_TREE; j++) cardResetTimeArr[base + j] = value;
 }
 
 // In-progress per-tap fades: tree index -> { fadeStartTime, fadeStartCoverage,
@@ -769,9 +941,9 @@ function updateTapFades(now){
       const eased = p * p * (3 - 2 * p); // smoothstep -- same easing idiom used for fades elsewhere in this scene
       coverage = fade.fadeStartCoverage + (fade.fadeTargetCoverage - fade.fadeStartCoverage) * eased;
     }
-    resetTimeAttr.array[i] = now - SNOW_BUILDUP_SPAN * (coverage / SNOW_BUILDUP_MAX);
+    writeTreeResetTime(i, now - SNOW_BUILDUP_SPAN * (coverage / SNOW_BUILDUP_MAX));
   }
-  resetTimeAttr.needsUpdate = true;
+  cardResetTimeAttr.needsUpdate = true;
 }
 
 // Applies one tap to tree `i`. Returns true if it actually registered
@@ -807,10 +979,51 @@ function applyTap(i, now){
   return true;
 }
 
-// Raycast against the two canopy InstancedMeshes (three.js raycaster
-// natively resolves instanceId on InstancedMesh hits) to find which tree,
-// if any, was tapped. pointerdown (not click) for lower touch latency and
-// because it pairs naturally with the canvas's existing touch-action:none.
+// ── Dusting shake ────────────────────────────────────────────────────────────
+// A brief decaying wobble of the whole card cluster around the tree's own
+// vertical axis when a tap registers -- cheap: only rewrites instance
+// matrices for the (small, rare) set of trees actively shaking right now,
+// same "touch only what's animating" discipline as updateTapFades. No new
+// shader code; this is plain CPU-side matrix composition, same as the
+// original per-tree placement pass.
+const SHAKE_DURATION = 0.6; // seconds until the wobble has fully settled
+const activeShakes = new Map(); // tree index -> { startTime }
+const _shakeRot = new THREE.Matrix4();
+const _shakeCombined = new THREE.Matrix4();
+
+function triggerShake(i, now){
+  activeShakes.set(i, { startTime: now });
+}
+
+function updateShakes(now){
+  if (activeShakes.size === 0) return;
+  for (const [i, shake] of activeShakes) {
+    const elapsed = now - shake.startTime;
+    let angleJitter = 0;
+    if (elapsed >= SHAKE_DURATION) {
+      activeShakes.delete(i); // settles back to the resting (unrotated) pose below
+    } else {
+      const envelope = Math.exp(-elapsed * 6.0);
+      angleJitter = Math.sin(elapsed * 18.0) * 0.14 * envelope
+                  + Math.sin(elapsed * 31.0 + 1.3) * 0.05 * envelope;
+    }
+    _shakeRot.makeRotationY(angleJitter);
+    _shakeCombined.multiplyMatrices(cardTreeMatrices[i], _shakeRot);
+    const base = i * CARDS_PER_TREE;
+    for (let j = 0; j < CARDS_PER_TREE; j++) {
+      _finalMat.multiplyMatrices(_shakeCombined, CARD_SLOT_MATRICES[j]);
+      cardMesh.setMatrixAt(base + j, _finalMat);
+    }
+  }
+  cardMesh.instanceMatrix.needsUpdate = true;
+}
+
+// Raycast against the canopy InstancedMesh (three.js raycaster natively
+// resolves instanceId on InstancedMesh hits) to find which tree, if any,
+// was tapped -- a hit instance index is a card index, so it's converted
+// back to a tree index by dividing out CARDS_PER_TREE. pointerdown (not
+// click) for lower touch latency and because it pairs naturally with the
+// canvas's existing touch-action:none.
 const tapRaycaster = new THREE.Raycaster();
 const tapNDC = new THREE.Vector2();
 function handleTap(clientX, clientY){
@@ -818,13 +1031,18 @@ function handleTap(clientX, clientY){
   tapNDC.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   tapNDC.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   tapRaycaster.setFromCamera(tapNDC, camera);
-  const hits = tapRaycaster.intersectObjects([tier1Mesh, tier2Mesh], false);
+  const hits = tapRaycaster.intersectObject(cardMesh, false);
   if (!hits.length) return null;
   const hit = hits[0];
-  const i = hit.instanceId;
-  if (i == null || i >= treePlacements.length) return null;
+  const cardIdx = hit.instanceId;
+  if (cardIdx == null) return null;
+  const i = Math.floor(cardIdx / CARDS_PER_TREE);
+  if (i >= treePlacements.length) return null;
   const registered = applyTap(i, simTime);
-  if (registered) spawnDustBurst(hit.point);
+  if (registered) {
+    spawnDustBurst(hit.point);
+    triggerShake(i, simTime);
+  }
   return registered ? i : null;
 }
 canvas.addEventListener('pointerdown', (e) => { handleTap(e.clientX, e.clientY); });
@@ -850,11 +1068,12 @@ renderer.setAnimationLoop(() => {
   simTime += dt;
   snowMat.uniforms.uTime.value = simTime;
   dustMat.uniforms.uTime.value = simTime;
-  // canopyMat's shader uniforms only exist once WebGL has actually compiled
+  // cardMat's shader uniforms only exist once WebGL has actually compiled
   // the patched shader (onBeforeCompile runs on first use) -- guard for the
   // very first frame(s) before that's happened.
-  if (canopyMat.userData.shader) canopyMat.userData.shader.uniforms.uTime.value = simTime;
+  if (cardMat.userData.shader) cardMat.userData.shader.uniforms.uTime.value = simTime;
   updateTapFades(simTime);
+  updateShakes(simTime);
 
   renderer.render(scene, camera);
 
@@ -866,7 +1085,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future work ───────────────────────────────────────────
-window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, tier1Mesh, tier2Mesh, treePlacements, snow, snowMat, SNOW_COUNT, tier1Geo, tier2Geo, canopyMat, resetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, get simTime(){ return simTime; } };
+window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, get simTime(){ return simTime; } };
 </script>
 </body>
 </html>
