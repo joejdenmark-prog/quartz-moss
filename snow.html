@@ -462,6 +462,16 @@ const cardMat = new THREE.MeshStandardMaterial({
   depthWrite: false,
   roughness: 0.85,
   side: THREE.DoubleSide, // cards aren't true billboards, so both faces need to shade correctly from any angle
+  // Explicit, not left to three's auto-detected default. Mobile Apple GPUs
+  // commonly run shaders at mediump unless a material forces highp; desktop
+  // Safari's capabilities check often reports highp support regardless,
+  // masking a precision-dependent bug that only shows up on real iPad
+  // hardware -- exactly the class of gap that bit an earlier scene in this
+  // project (rain.html). This vertex shader composes a per-instance world
+  // position from matrices spanning a wide world-space range (trees spread
+  // across +-90 units) against small local card offsets, which is the kind
+  // of math mediump's ~10-bit mantissa can visibly lose precision on.
+  precision: 'highp',
 });
 // Patches the compiled shader to compute each tree's snow coverage live
 // from its own aResetTime, instead of reading a precomputed vertex color.
