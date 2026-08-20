@@ -256,6 +256,14 @@ const CANOPY_Y_BOTTOM = TIER1_BASE_Y;
 const CANOPY_Y_TOP = TIER2_BASE_Y + TIER2_H;
 const CANOPY_Y_SPAN = CANOPY_Y_TOP - CANOPY_Y_BOTTOM;
 
+// Applied as an instance-transform stretch (Y only, not X/Z) rather than a
+// geometry change -- taller trunk+canopy together, without proportionally
+// widening the canopy too, which reads as more looming/immersive rather
+// than just "the same tree but bigger". Needed here (not just at the tree-
+// placement loop below) because it also has to be baked into each card
+// slot's own local Y values -- see the shear note on CARD_SLOT_MATRICES.
+const HEIGHT_MULT = 1.65;
+
 // Card "slots": one shared layout reused by every tree (like the old cone
 // geometry was identical for every tree) -- randomized once at load via the
 // same seeded rng as everything else, not per-tree, so this stays a single
@@ -291,11 +299,29 @@ const CARDS_PER_TREE = CARD_SLOTS.length; // 43
 
 // Local (tree-space) transform for each slot, shared across every tree --
 // composed with each tree's own placement matrix at instance-build time.
+// HEIGHT_MULT is baked in HERE (position.y and scale.y), not into the
+// tree-level matrix this gets composed with, and that placement matters:
+// three's Object3D.updateMatrix() always builds T*R*S with scale applied
+// innermost (to the raw local vertices, before rotation touches them),
+// which is shear-free by construction regardless of whether the scale is
+// uniform. The earlier version instead baked HEIGHT_MULT into the TREE's
+// own matrix (as a non-uniform scale on scale.y) and then multiplied that
+// by this slot matrix afterward -- multiplying a non-uniformly-scaled
+// matrix by a SEPARATE matrix that has its own independent rotation
+// applies that scale to an already-rotated frame, which genuinely shears
+// the result (confirmed by checking the composed matrix's basis columns
+// for orthogonality -- they weren't orthogonal). That shear left the
+// translation (anchor point) reading as correct on inspection while the
+// card's actual rendered shape/extent flew off away from it -- exactly
+// the "canopy floating disconnected from its trunk" bug. Keeping the only
+// non-uniform scale in the whole tree+card composition chain at this one
+// innermost T*R*S spot avoids it everywhere downstream (including the
+// dusting-shake matrices in updateShakes, which compose on top of this).
 const slotDummy = new THREE.Object3D();
 const CARD_SLOT_MATRICES = CARD_SLOTS.map(s => {
-  slotDummy.position.set(Math.cos(s.angle) * s.r, s.y, Math.sin(s.angle) * s.r);
+  slotDummy.position.set(Math.cos(s.angle) * s.r, s.y * HEIGHT_MULT, Math.sin(s.angle) * s.r);
   slotDummy.rotation.set(s.tiltX, s.angle, s.tiltZ); // radially outward (yaw) plus a small individual lean/roll
-  slotDummy.scale.set(s.w, s.h, 1);
+  slotDummy.scale.set(s.w, s.h * HEIGHT_MULT, 1);
   slotDummy.updateMatrix();
   return slotDummy.matrix.clone();
 });
@@ -551,12 +577,6 @@ function scatterTrees(count){
 }
 const treePlacements = scatterTrees(TREE_COUNT);
 
-// Applied as an instance-transform stretch (Y only, not X/Z) rather than a
-// geometry change -- taller trunk+canopy together, without proportionally
-// widening the canopy too, which reads as more looming/immersive rather
-// than just "the same tree but bigger".
-const HEIGHT_MULT = 1.65;
-
 // Per-tree transform WITHOUT rotationY, used only for card instancing --
 // cards ignore the trunk's own random yaw (their local slot angles are
 // already randomized in CARD_SLOTS, and un-rotating them here avoids
@@ -584,7 +604,12 @@ for (let i = 0; i < treePlacements.length; i++) {
   dummy.updateMatrix();
   trunkMesh.setMatrixAt(i, dummy.matrix);
 
+  // Uniform scale here (not scale*HEIGHT_MULT on Y) -- HEIGHT_MULT is
+  // already baked into CARD_SLOT_MATRICES itself (see the shear note
+  // above); this matrix only needs to carry the tree's own uniform size
+  // variance so composing it with a slot's rotation stays shear-free.
   dummy.rotation.set(0, 0, 0);
+  dummy.scale.set(scale, scale, scale);
   dummy.updateMatrix();
   cardTreeMatrices[i] = dummy.matrix.clone();
 
@@ -612,6 +637,13 @@ cardMesh.instanceMatrix.needsUpdate = true;
 cardMesh.instanceColor.needsUpdate = true;
 cardHeightTAttr.needsUpdate = true;
 cardTintAttr.needsUpdate = true;
+// cardGeo's own raw bounding sphere (a small 1x1 plane near the origin)
+// doesn't reflect where the 15k+ instances actually sit once scattered
+// across the whole forest -- same reasoning as `snow`/`dust` elsewhere in
+// this file. Not the cause of the shear bug (that was matrix composition,
+// fixed above), but worth being explicit rather than relying on the
+// default culling behavior being harmless here.
+cardMesh.frustumCulled = false;
 
 scene.add(trunkMesh, cardMesh);
 
