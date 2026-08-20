@@ -309,12 +309,11 @@ const TIER2_R = 0.55, TIER2_H = 1.5, TIER2_BASE_Y = TIER1_BASE_Y + TIER1_H * 0.5
 const tier2Geo = snowCappedCone(TIER2_R, TIER2_H, 7);
 tier2Geo.translate(0, TIER2_BASE_Y + TIER2_H / 2, 0);
 
-// Snow buildup: starts lightly dusted, gradually covers more of each
-// canopy over SNOW_BUILDUP_SPAN seconds, capped at SNOW_BUILDUP_MAX so
-// trees settle into "convincingly snow-laden" rather than becoming solid
-// white blobs. Values fed to the shader as uniforms below, not duplicated
-// as GLSL literals, so there's nothing to keep in sync by hand.
-const SNOW_BUILDUP_START = 0.12;
+// Snow buildup: starts bare, gradually covers more of each canopy over
+// SNOW_BUILDUP_SPAN seconds, capped at SNOW_BUILDUP_MAX so trees settle
+// into "convincingly snow-laden" rather than becoming solid white blobs.
+// Values fed to the shader as uniforms below, not duplicated as GLSL
+// literals, so there's nothing to keep in sync by hand.
 // Safe to push much higher than it looks, since the cone's base ring is
 // pinned to pure green by construction (pow(0, x) = 0, see the exponent
 // comment in the shader patch below) regardless of how high this goes.
@@ -346,25 +345,35 @@ canopyMat.onBeforeCompile = (shader) => {
   shader.uniforms.uTime = { value: 0 };
   shader.uniforms.uCanopyGreen = { value: CANOPY_GREEN };
   shader.uniforms.uCanopySnow = { value: CANOPY_SNOW };
-  shader.uniforms.uBuildupStart = { value: SNOW_BUILDUP_START };
   shader.uniforms.uBuildupMax = { value: SNOW_BUILDUP_MAX };
   shader.uniforms.uBuildupSpan = { value: SNOW_BUILDUP_SPAN };
 
   shader.vertexShader = `
     attribute float aHeightT;
     attribute float aResetTime;
-    uniform float uTime, uBuildupStart, uBuildupMax, uBuildupSpan;
+    uniform float uTime, uBuildupMax, uBuildupSpan;
     uniform vec3 uCanopyGreen, uCanopySnow;
     varying vec3 vSnowColor;
   ` + shader.vertexShader.replace('#include <color_vertex>', `
     #include <color_vertex>
     {
       float elapsed = max(uTime - aResetTime, 0.0);
-      float coverage = uBuildupStart + (uBuildupMax - uBuildupStart) * min(1.0, elapsed / uBuildupSpan);
+      // 0 at reset/spawn, 1 once fully built up -- a real zero, not a
+      // floored one, so a freshly-reset tree can actually reach "no snow".
+      float elapsedNorm = min(1.0, elapsed / uBuildupSpan);
+      float coverage = uBuildupMax * elapsedNorm;
       // Lower exponent = the pow(t, exponent) curve stays high (near 1, i.e.
       // snowy) further down the cone -- more of the tree reads as covered.
       float exponent = mix(1.6, 0.15, coverage);
-      vec3 snowColor = mix(uCanopyGreen, uCanopySnow, pow(aHeightT, exponent));
+      // pow(aHeightT, exponent) alone can't reach zero at the apex (t=1):
+      // pow(1, x) == 1 for every exponent, so the tip was always rendered
+      // as 100% snow color regardless of coverage -- that's what was
+      // showing as a white tint even at minimum coverage. Multiplying by
+      // elapsedNorm scales the whole blend down to true zero everywhere
+      // (apex included) when coverage is zero, while still reproducing
+      // the exact previously-tuned look once elapsedNorm reaches 1.
+      float blend = pow(aHeightT, exponent) * elapsedNorm;
+      vec3 snowColor = mix(uCanopyGreen, uCanopySnow, blend);
       #ifdef USE_INSTANCING_COLOR
         snowColor *= instanceColor.rgb;
       #endif
@@ -804,7 +813,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future work ───────────────────────────────────────────
-window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, tier1Mesh, tier2Mesh, treePlacements, snow, snowMat, SNOW_COUNT, tier1Geo, tier2Geo, canopyMat, resetTimeAttr, SNOW_BUILDUP_START, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, get simTime(){ return simTime; } };
+window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, tier1Mesh, tier2Mesh, treePlacements, snow, snowMat, SNOW_COUNT, tier1Geo, tier2Geo, canopyMat, resetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, get simTime(){ return simTime; } };
 </script>
 </body>
 </html>
