@@ -318,7 +318,7 @@ tier2Geo.translate(0, TIER2_BASE_Y + TIER2_H / 2, 0);
 // pinned to pure green by construction (pow(0, x) = 0, see the exponent
 // comment in the shader patch below) regardless of how high this goes.
 const SNOW_BUILDUP_MAX   = 0.92;
-const SNOW_BUILDUP_SPAN  = 25; // seconds to go from start to max coverage
+const SNOW_BUILDUP_SPAN  = 15; // seconds to go from start to max coverage
 
 // Per-instance "last dusted" timestamp (simTime at last tap, 0 = never
 // tapped). This is the one piece of real per-tree state the tap-to-reset
@@ -754,6 +754,54 @@ function spawnDustBurst(originPoint){
   dustStartAttr.needsUpdate = true;
 }
 
+// ── Multi-tap dusting state machine ──────────────────────────────────────────
+// Coverage is the sum of two things running concurrently: natural time-based
+// buildup (still just the shader's existing `uBuildupMax * min(1, (uTime -
+// aResetTime)/uBuildupSpan)` formula, completely unchanged) and cumulative
+// removal from taps. Rather than track "removed" as a separate quantity fed
+// into the shader, every tap RE-ANCHORS aResetTime to whatever value makes
+// that same unchanged formula produce the desired reduced coverage right
+// now -- the same trick the old single-tap reset already used (aResetTime =
+// now, i.e. "make coverage 0 right now"), just solved for an arbitrary
+// target level instead of only 0. The shader needs zero new code for this;
+// only the JS deciding what number to write changes.
+const TAP_COOLDOWN = 0.5; // seconds -- per tree, shared across both canopy tiers (one tapState per tree index, since a tap on either tier counts as tapping the whole tree)
+const tapState = new Array(treePlacements.length).fill(null); // lazily created per tree on first tap: { tapsRemaining, perTapRemoval, lastTapTime }
+
+// Mirrors the shader's coverage formula exactly (see canopyMat.onBeforeCompile)
+// -- must stay in sync if that formula ever changes.
+function coverageNow(i, now){
+  const elapsed = Math.max(0, now - resetTimeAttr.array[i]);
+  const elapsedNorm = Math.min(1, elapsed / SNOW_BUILDUP_SPAN);
+  return SNOW_BUILDUP_MAX * elapsedNorm;
+}
+
+// Applies one tap to tree `i`. Returns true if it actually registered
+// (false if it was ignored: still on cooldown, or the tree is already bare).
+function applyTap(i, now){
+  const state = tapState[i] || (tapState[i] = { tapsRemaining: 0, perTapRemoval: 0, lastTapTime: -Infinity });
+  if (now - state.lastTapTime < TAP_COOLDOWN) return false;
+
+  const current = coverageNow(i, now);
+  if (state.tapsRemaining <= 0) {
+    if (current <= 0) return false; // bare tree -- tapping does nothing, no cooldown consumed either
+    // Tap tier + per-tap removal are fixed from coverage AT THIS FIRST TAP
+    // of the sequence; later taps in the same sequence reuse this same
+    // perTapRemoval even as natural buildup keeps nudging live coverage up.
+    const frac = current / SNOW_BUILDUP_MAX;
+    const requiredTaps = frac > 2/3 ? 3 : frac > 1/3 ? 2 : 1;
+    state.tapsRemaining = requiredTaps;
+    state.perTapRemoval = current / requiredTaps;
+  }
+
+  state.lastTapTime = now;
+  state.tapsRemaining -= 1;
+  const target = Math.max(0, current - state.perTapRemoval);
+  resetTimeAttr.array[i] = now - SNOW_BUILDUP_SPAN * (target / SNOW_BUILDUP_MAX);
+  resetTimeAttr.needsUpdate = true;
+  return true;
+}
+
 // Raycast against the two canopy InstancedMeshes (three.js raycaster
 // natively resolves instanceId on InstancedMesh hits) to find which tree,
 // if any, was tapped. pointerdown (not click) for lower touch latency and
@@ -770,10 +818,9 @@ function handleTap(clientX, clientY){
   const hit = hits[0];
   const i = hit.instanceId;
   if (i == null || i >= treePlacements.length) return null;
-  resetTimeAttr.array[i] = simTime;
-  resetTimeAttr.needsUpdate = true;
-  spawnDustBurst(hit.point);
-  return i;
+  const registered = applyTap(i, simTime);
+  if (registered) spawnDustBurst(hit.point);
+  return registered ? i : null;
 }
 canvas.addEventListener('pointerdown', (e) => { handleTap(e.clientX, e.clientY); });
 
@@ -813,7 +860,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future work ───────────────────────────────────────────
-window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, tier1Mesh, tier2Mesh, treePlacements, snow, snowMat, SNOW_COUNT, tier1Geo, tier2Geo, canopyMat, resetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, get simTime(){ return simTime; } };
+window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, tier1Mesh, tier2Mesh, treePlacements, snow, snowMat, SNOW_COUNT, tier1Geo, tier2Geo, canopyMat, resetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, applyTap, coverageNow, tapState, TAP_COOLDOWN, get simTime(){ return simTime; } };
 </script>
 </body>
 </html>
