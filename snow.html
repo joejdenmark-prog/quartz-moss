@@ -287,8 +287,12 @@ const HEIGHT_MULT = 1.65;
 //   rings once cards got this large. Wider jitter lets adjacent bands'
 //   cards interleave vertically and break up the tiered look, without
 //   touching the proven per-band radius taper.
+// sizeMult (default 1.0, only the base band overrides it) scales w/h for
+// JUST that band -- a targeted fix for lingering bare-trunk gaps low on
+// the tree, without touching the size/density of every other band, which
+// already reads correctly. Bumped this band's count too, same reasoning.
 const CARD_BANDS = [
-  { yFrac: 0.00, radius: TIER1_R * 0.95, count: 32 },
+  { yFrac: 0.00, radius: TIER1_R * 0.95, count: 42, sizeMult: 1.35 },
   { yFrac: 0.22, radius: TIER1_R * 0.80, count: 27 },
   { yFrac: 0.38, radius: TIER1_R * 0.60, count: 24 },
   { yFrac: 0.55, radius: TIER2_R * 0.90, count: 20 },
@@ -297,6 +301,7 @@ const CARD_BANDS = [
 ];
 const CARD_SLOTS = [];
 for (const band of CARD_BANDS) {
+  const sizeMult = band.sizeMult || 1.0;
   for (let k = 0; k < band.count; k++) {
     const angle = (k / band.count) * Math.PI * 2 + range(-0.3, 0.3);
     const y = CANOPY_Y_BOTTOM + band.yFrac * CANOPY_Y_SPAN + range(-0.16, 0.16);
@@ -304,8 +309,8 @@ for (const band of CARD_BANDS) {
     // Sized against the vertical gap between bands (not the whole canopy
     // radius) -- modest, roughly clump-sized absolute dimensions, small and
     // numerous enough to overlap into continuous-looking foliage.
-    const w = range(0.52, 0.80);
-    const h = range(0.48, 0.70);
+    const w = range(0.52, 0.80) * sizeMult;
+    const h = range(0.48, 0.70) * sizeMult;
     // Small random lean/roll per card (not just the shared yaw below) --
     // uniform flat cards all tilted identically within a band read as
     // repeated stickers; a bit of individual tilt variety breaks that up.
@@ -328,7 +333,7 @@ for (const band of CARD_BANDS) {
     CARD_SLOTS.push({ y, angle, r, w, h, tiltX, tiltZ, heightT });
   }
 }
-const CARDS_PER_TREE = CARD_SLOTS.length; // 130
+const CARDS_PER_TREE = CARD_SLOTS.length; // 140 (was 130; +10 all in the base band)
 
 // Local (tree-space) transform for each slot, shared across every tree --
 // composed with each tree's own placement matrix at instance-build time.
