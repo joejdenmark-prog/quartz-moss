@@ -268,36 +268,49 @@ const HEIGHT_MULT = 1.65;
 // geometry was identical for every tree) -- randomized once at load via the
 // same seeded rng as everything else, not per-tree, so this stays a single
 // small array rather than 360 separate layouts.
-// Fifth pass: count stays locked at 130 (confirmed good clump character).
-// Size goes up again -- still gaps at the previous size, per feedback.
-const CARD_BANDS = [
-  { yFrac: 0.06, radius: TIER1_R * 0.95, count: 32 },
-  { yFrac: 0.22, radius: TIER1_R * 0.80, count: 27 },
-  { yFrac: 0.38, radius: TIER1_R * 0.60, count: 24 },
-  { yFrac: 0.55, radius: TIER2_R * 0.90, count: 20 },
-  { yFrac: 0.72, radius: TIER2_R * 0.60, count: 16 },
-  { yFrac: 0.90, radius: TIER2_R * 0.25, count: 11 },
-];
+// Sixth pass: replaces the 6 discrete stacked bands entirely. Bands were
+// exactly what made the canopy read as a tiered cylindrical column instead
+// of a natural silhouette (each band = one fixed-radius ring), and their
+// yFrac spacing (first ring at 0.06, i.e. barely above CANOPY_Y_BOTTOM)
+// was thinning out disproportionately toward the base once cards grew
+// large enough to leave visible gaps between rings. Both replaced by one
+// continuous per-slot distribution below.
+const CARDS_PER_TREE = 130; // locked -- good clump character, confirmed; do not raise further
+const CARD_MAX_RADIUS = TIER1_R * 1.05;
+const CARD_MIN_RADIUS_FRAC = 0.22; // floor at the very top/bottom -- narrows the silhouette there without pinching to a literal point
 const CARD_SLOTS = [];
-for (const band of CARD_BANDS) {
-  for (let k = 0; k < band.count; k++) {
-    const angle = (k / band.count) * Math.PI * 2 + range(-0.3, 0.3);
-    const y = CANOPY_Y_BOTTOM + band.yFrac * CANOPY_Y_SPAN + range(-0.05, 0.05);
-    const r = band.radius * range(0.85, 1.15);
-    // Sized against the vertical gap between bands (not the whole canopy
-    // radius) -- modest, roughly clump-sized absolute dimensions, small and
-    // numerous enough to overlap into continuous-looking foliage.
-    const w = range(0.52, 0.80);
-    const h = range(0.48, 0.70);
-    // Small random lean/roll per card (not just the shared yaw below) --
-    // uniform flat cards all tilted identically within a band read as
-    // repeated stickers; a bit of individual tilt variety breaks that up.
-    const tiltX = range(-0.3, 0.3);
-    const tiltZ = range(-0.25, 0.25);
-    CARD_SLOTS.push({ y, angle, r, w, h, tiltX, tiltZ, heightT: band.yFrac });
-  }
+for (let k = 0; k < CARDS_PER_TREE; k++) {
+  // Triangular distribution (average of two uniforms), not a flat 0..1
+  // spread: concentrates more slots toward mid-height, roughly tracking
+  // how the bulge shape below makes the middle's circumference larger
+  // than the tapered top/bottom -- keeps areal density roughly even along
+  // the whole silhouette instead of thinning at the wide middle or
+  // over-clumping at the narrow ends. t=0 is the canopy's bottom edge
+  // (right where the bare trunk zone below CANOPY_Y_BOTTOM ends), t=1 is
+  // the very tip, so this also reaches the full range down to the trunk
+  // instead of stopping short of it.
+  const t = (rng() + rng()) / 2;
+  const y = CANOPY_Y_BOTTOM + t * CANOPY_Y_SPAN + range(-0.04, 0.04);
+  // Bulge silhouette -- narrower at both the very top and very bottom,
+  // wider through the middle (sin peaks at t=0.5), with per-slot
+  // randomness (both the exponent's effect and the final jitter) so it
+  // reads as an irregular, natural taper rather than one obviously
+  // smooth mathematical curve.
+  const shapeFrac = CARD_MIN_RADIUS_FRAC + (1 - CARD_MIN_RADIUS_FRAC) * Math.pow(Math.sin(Math.PI * t), 0.7);
+  const r = CARD_MAX_RADIUS * shapeFrac * range(0.75, 1.2);
+  const angle = range(0, Math.PI * 2); // fully random, not evenly-spaced-within-a-ring, for the same reason
+  // Sized against the vertical gap between bands (not the whole canopy
+  // radius) -- modest, roughly clump-sized absolute dimensions, small and
+  // numerous enough to overlap into continuous-looking foliage.
+  const w = range(0.52, 0.80);
+  const h = range(0.48, 0.70);
+  // Small random lean/roll per card (not just the shared yaw below) --
+  // uniform flat cards all tilted identically within a band read as
+  // repeated stickers; a bit of individual tilt variety breaks that up.
+  const tiltX = range(-0.3, 0.3);
+  const tiltZ = range(-0.25, 0.25);
+  CARD_SLOTS.push({ y, angle, r, w, h, tiltX, tiltZ, heightT: t });
 }
-const CARDS_PER_TREE = CARD_SLOTS.length; // 130
 
 // Local (tree-space) transform for each slot, shared across every tree --
 // composed with each tree's own placement matrix at instance-build time.
