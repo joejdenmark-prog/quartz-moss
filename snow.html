@@ -287,13 +287,16 @@ const HEIGHT_MULT = 1.65;
 //   rings once cards got this large. Wider jitter lets adjacent bands'
 //   cards interleave vertically and break up the tiered look, without
 //   touching the proven per-band radius taper.
-// sizeMult (default 1.0, only the base band overrides it) scales w/h for
-// JUST that band -- a targeted fix for lingering bare-trunk gaps low on
-// the tree, without touching the size/density of every other band, which
-// already reads correctly. Bumped this band's count too, same reasoning.
+// sizeMult (default 1.0) scales w/h for just one band at a time -- a
+// targeted fix for lingering bare-trunk gaps at specific heights, without
+// touching the size/density of every other band. First applied to the
+// base band (fixed a gap right at ground level); the SECOND band (0.22)
+// gets the same treatment here, for a distinct gap reported partway up
+// the trunk, below the main canopy mass -- a different zone than the
+// base band already fixed.
 const CARD_BANDS = [
   { yFrac: 0.00, radius: TIER1_R * 0.95, count: 42, sizeMult: 1.35 },
-  { yFrac: 0.22, radius: TIER1_R * 0.80, count: 27 },
+  { yFrac: 0.22, radius: TIER1_R * 0.80, count: 36, sizeMult: 1.3 },
   { yFrac: 0.38, radius: TIER1_R * 0.60, count: 24 },
   { yFrac: 0.55, radius: TIER2_R * 0.90, count: 20 },
   { yFrac: 0.72, radius: TIER2_R * 0.60, count: 16 },
@@ -333,7 +336,7 @@ for (const band of CARD_BANDS) {
     CARD_SLOTS.push({ y, angle, r, w, h, tiltX, tiltZ, heightT });
   }
 }
-const CARDS_PER_TREE = CARD_SLOTS.length; // 140 (was 130; +10 all in the base band)
+const CARDS_PER_TREE = CARD_SLOTS.length; // 149 (was 140; +9 all in the second band)
 
 // Local (tree-space) transform for each slot, shared across every tree --
 // composed with each tree's own placement matrix at instance-build time.
