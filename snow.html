@@ -1266,9 +1266,16 @@ function updateShakes(now){
     if (elapsed >= SHAKE_DURATION) {
       activeShakes.delete(i); // settles back to the resting (unrotated) pose below
     } else {
+      // Amplitude reduced (was 0.14/0.05) -- the wobble's peak swing could
+      // approach the size of the angular gaps found in the card layout
+      // (measured 30-36 degrees in one stretch), and on a tree whose
+      // static gap sits close to the camera-facing edge already, that
+      // swing risked briefly widening/exposing it further. Smaller
+      // amplitude shrinks that risk globally rather than patching one
+      // tree's layout.
       const envelope = Math.exp(-elapsed * 6.0);
-      angleJitter = Math.sin(elapsed * 18.0) * 0.14 * envelope
-                  + Math.sin(elapsed * 31.0 + 1.3) * 0.05 * envelope;
+      angleJitter = Math.sin(elapsed * 18.0) * 0.10 * envelope
+                  + Math.sin(elapsed * 31.0 + 1.3) * 0.04 * envelope;
     }
     const base = blockPosOfTree[i] * CARDS_PER_TREE;
     // aShakeAngle is what actually drives the rendered wobble now (see the
