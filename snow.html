@@ -777,6 +777,36 @@ function scatterTrees(count){
   return placements;
 }
 const treePlacements = scatterTrees(TREE_COUNT);
+// Tree 9 placement override: at its originally-scattered distance (27.0
+// units) it visually dominated the frame compared to neighboring trees --
+// a placement preference, not a bug (the earlier base-band gap fix was
+// separately confirmed correct via matched-distance/matched-framing
+// comparison, so this is unrelated to card size/density). Pushed straight
+// back along its existing bearing from the camera to ~50 units, comfortably
+// past the fog's start distance (45, see scene.fog below) for a natural
+// atmospheric recession, and re-validated against MIN_SPACING for every
+// OTHER tree so it doesn't overlap anything. Overriding treePlacements[9]
+// directly (not re-running scatterTrees or consuming any extra range()
+// draws) so no other tree's placement is affected.
+treePlacements[9] = { x: -12.58454581272635, z: -39.86683323009889 };
+// Tree 346: after moving tree 9 back, the frame's left side still looked
+// dominated by one oversized-looking tree -- confirmed (by isolating a
+// same-camera before/after crop) that a separate, ordinary neighboring
+// tree (346, 149 cards, nothing anomalous) sits almost exactly where tree
+// 9 used to be and was the actual remaining cause. Same treatment: pushed
+// back along its own existing bearing to ~50 units, re-validated against
+// MIN_SPACING for every other tree (now including tree 9's new position).
+treePlacements[346] = { x: -8.890171657648896, z: -39.79963279848468 };
+// Moving 9 and 346 alone didn't fix the visible dominance either -- a
+// screen-region scan turned up a whole cluster of even-closer, otherwise
+// ordinary trees blended into the same patch of frame: 350 (13.2 units)
+// and 281 (8.4 units, essentially right in front of the camera), plus 169
+// (25.1, noticeably under the ~29-unit local median). Same treatment for
+// all three, applied in sequence so each later placement is validated
+// against the earlier ones too.
+treePlacements[281] = { x: -2.7999361512911047, z: -38.18645063716067 };
+treePlacements[350] = { x: -15.576773008980547, z: -40.07428469916258 };
+treePlacements[169] = { x: 0.4231123875699341, z: -38.67492343526442 };
 
 // Card instances are grouped into one fixed-size block per tree, but the
 // BLOCK ORDER is sorted back-to-front by distance from the camera --
