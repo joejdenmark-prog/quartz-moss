@@ -813,7 +813,21 @@ for (let i = 0; i < treePlacements.length; i++) {
   // band's actual size or count. Still uniform scale + pure rotation here
   // (no shear risk, per the earlier fix -- shear only comes from
   // composing non-uniform scale with an independently-rotated child).
-  const cardYaw = range(0, Math.PI * 2);
+  let cardYaw = range(0, Math.PI * 2);
+  // Tree-specific override, not a global change: tree 9's random cardYaw
+  // happened to align its BASE band's real angular gap almost exactly
+  // with the camera's viewing direction from that tree -- measured
+  // directly (not assumed): camera bearing 77.8 degrees from this tree,
+  // base-band gap spanning 52.7-82.6 degrees, bearing only 4.8 degrees
+  // from the nearest edge, deep inside it. Confirmed NOT a shake artifact
+  // (already tested and ruled out separately) and not a systemic band
+  // issue (every other tested tree's alignment differs) -- a genuine,
+  // unlucky coincidence for this one tree specifically. Still calling
+  // range() unconditionally above (not skipping it) so every OTHER tree's
+  // RNG-derived values (scale, rotY, cardYaw, tint) are completely
+  // unaffected by this override -- only tree 9's own already-drawn value
+  // gets nudged afterward, well clear of its camera-facing direction.
+  if (i === 9) cardYaw += Math.PI * (120 / 180);
   dummy.rotation.set(0, cardYaw, 0);
   dummy.scale.set(scale, scale, scale);
   dummy.updateMatrix();
@@ -1160,7 +1174,7 @@ function spawnDustBurst(originPoint){
 // now, i.e. "make coverage 0 right now"), just solved for an arbitrary
 // target level instead of only 0. The shader needs zero new code for this;
 // only the JS deciding what number to write changes.
-const TAP_COOLDOWN = 0.8; // seconds -- per tree (one tapState per tree index, since a tap on any of that tree's cards counts as tapping the whole tree)
+const TAP_COOLDOWN = 0.5; // seconds -- per tree (one tapState per tree index, since a tap on any of that tree's cards counts as tapping the whole tree)
 const TAP_FADE_DURATION = 0.25; // seconds -- how long a single tap's removal takes to visibly settle, rather than snapping instantly
 const tapState = new Array(treePlacements.length).fill(null); // lazily created per tree on first tap: { tapsRemaining, perTapRemoval, lastTapTime }
 
