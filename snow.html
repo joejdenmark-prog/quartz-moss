@@ -655,12 +655,18 @@ barkTex.repeat.set(3, 2); // a handful of grooves per repeat, tiled a couple of 
 // black, at close range. This tone keeps a dark, believably-bark
 // brown while leaving enough dynamic range for the groove texture and bump
 // shading to actually read.
-// Lightened again from 0x8a6f56 -- a modest ~10% blend toward white,
-// same hue ratio preserved, not a hue change. Groove/noise contrast on
-// barkTex is a much wider swing (roughly +-70 gray levels) than this base
-// tone shifted, so detail stays clearly visible on top of it.
+// Lightened further still -- the first two attempts (0x967d67, then
+// 0xb3a191) both turned out to be genuinely too subtle: verified via a
+// framed-large close-up (trunk filling most of the screen, not a small
+// distant sliver against dark canopy shadow, which was hiding the real
+// difference in earlier smaller-scale checks) that ACESFilmicToneMapping
+// (see renderer.toneMapping above) compresses albedo changes noticeably
+// more than a raw hex blend suggests -- so this needed a much bigger push
+// than expected. This value (light olive-tan) reads as clearly, visibly
+// lighter at that framing while still leaving barkTex's groove contrast
+// legible on top.
 const trunkMat = new THREE.MeshStandardMaterial({
-  color: 0x967d67,
+  color: 0xe0d0bb,
   roughness: 0.95,
   map: barkTex,
   bumpMap: barkTex,
