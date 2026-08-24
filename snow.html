@@ -342,7 +342,37 @@ for (const band of CARD_BANDS) {
     CARD_SLOTS.push({ y, angle, r, w, h, tiltX, tiltZ, heightT });
   }
 }
-const CARDS_PER_TREE = CARD_SLOTS.length; // 149 (was 140; +9 all in the second band)
+// Tree 9 brute-force base-band fix: the cardYaw nudge above closed most of
+// this one tree's persistent base-band gap but not all of it, and rather
+// than keep chasing incremental angular adjustments, add a dedicated ring
+// of extra, oversized base-band cards -- evenly spaced with NO angular
+// jitter (gap-free by construction, unlike the jittered main bands) --
+// appended to every tree's slot layout. They're only given nonzero size
+// for tree 9 (see the extraFor9 handling in the tree loop below); every
+// other tree renders/raycasts these as zero-size, effectively free,
+// invisible instances, so this is a true single-tree override, not a
+// global density change. Uses its own separate seeded RNG (range9), not
+// the shared rng/range stream, so appending these slots here -- before the
+// per-tree loop -- doesn't shift any tree's scale, rotY, cardYaw, or tint,
+// all of which are drawn later from the untouched shared stream.
+const rng9 = mulberry32(0x5f10009);
+const range9 = (a, b) => a + rng9() * (b - a);
+const EXTRA_BASE9_COUNT = 40;
+{
+  const band = CARD_BANDS[0];
+  for (let k = 0; k < EXTRA_BASE9_COUNT; k++) {
+    const angle = (k / EXTRA_BASE9_COUNT) * Math.PI * 2; // no jitter -- evenly spaced, gap-free by construction
+    const y = CANOPY_Y_BOTTOM + band.yFrac * CANOPY_Y_SPAN + range9(-0.16, 0.16);
+    const r = band.radius * range9(0.85, 1.15);
+    const w = range9(1.0, 1.3);  // deliberately overkill -- brute-force closure, not a subtle tweak
+    const h = range9(0.9, 1.15);
+    const tiltX = range9(-0.3, 0.3);
+    const tiltZ = range9(-0.25, 0.25);
+    const heightT = Math.min(1, Math.max(0.05, (y - CANOPY_Y_BOTTOM) / CANOPY_Y_SPAN));
+    CARD_SLOTS.push({ y, angle, r, w, h, tiltX, tiltZ, heightT, extraFor9: true });
+  }
+}
+const CARDS_PER_TREE = CARD_SLOTS.length; // 189 (149 + 40 tree-9-only extras, zero-size for every other tree)
 
 // Local (tree-space) transform for each slot, shared across every tree --
 // composed with each tree's own placement matrix at instance-build time.
@@ -842,16 +872,35 @@ for (let i = 0; i < treePlacements.length; i++) {
     // Block position (blockPosOfTree[i]), not tree placement index i --
     // see the back-to-front sort comment above.
     const instIdx = blockPosOfTree[i] * CARDS_PER_TREE + j;
+    // Raw placement data the vertex shader actually renders from.
+    const slot = CARD_SLOTS[j];
+    // extraFor9 slots (see CARD_SLOTS build above) only get real size for
+    // tree 9 -- every other tree gets w=h=0 here AND in the raycasting
+    // matrix below, so the extras are truly invisible and untappable
+    // everywhere except the one tree they were added to fix.
+    const isExtraHidden = slot.extraFor9 && i !== 9;
+    const renderW = isExtraHidden ? 0 : slot.w;
+    const renderH = isExtraHidden ? 0 : slot.h;
+
     // instanceMatrix: kept correct (raycasting only -- see the shader
-    // patch above for why rendering no longer reads this).
-    _finalMat.multiplyMatrices(cardTreeMatrices[i], CARD_SLOT_MATRICES[j]);
+    // patch above for why rendering no longer reads this). extraFor9
+    // slots can't reuse the shared CARD_SLOT_MATRICES here since that
+    // array bakes one fixed w/h shared by every tree -- this per-instance
+    // rebuild is what lets the hitbox actually go to zero for non-9 trees.
+    if (slot.extraFor9) {
+      dummy.position.set(Math.cos(slot.angle) * slot.r, slot.y * HEIGHT_MULT, Math.sin(slot.angle) * slot.r);
+      dummy.rotation.set(slot.tiltX, slot.angle, slot.tiltZ);
+      dummy.scale.set(renderW, renderH * HEIGHT_MULT, 1);
+      dummy.updateMatrix();
+      _finalMat.multiplyMatrices(cardTreeMatrices[i], dummy.matrix);
+    } else {
+      _finalMat.multiplyMatrices(cardTreeMatrices[i], CARD_SLOT_MATRICES[j]);
+    }
     cardMesh.setMatrixAt(instIdx, _finalMat);
     cardMesh.setColorAt(instIdx, tint);
     cardHeightTArr[instIdx] = CARD_SLOTS[j].heightT;
     cardTintArr[instIdx] = range(0.78, 1.18);
 
-    // Raw placement data the vertex shader actually renders from.
-    const slot = CARD_SLOTS[j];
     cardPlaceAArr[instIdx*4]   = x;
     cardPlaceAArr[instIdx*4+1] = z;
     cardPlaceAArr[instIdx*4+2] = scale;
@@ -865,8 +914,8 @@ for (let i = 0; i < treePlacements.length; i++) {
     cardPlaceBArr[instIdx*4+1] = slot.y;
     cardPlaceBArr[instIdx*4+2] = slot.tiltX;
     cardPlaceBArr[instIdx*4+3] = slot.tiltZ;
-    cardSlotSizeArr[instIdx*2] = slot.w;
-    cardSlotSizeArr[instIdx*2+1] = slot.h;
+    cardSlotSizeArr[instIdx*2] = renderW;
+    cardSlotSizeArr[instIdx*2+1] = renderH;
   }
 }
 // Placements can land short of TREE_COUNT if the field fills up before
