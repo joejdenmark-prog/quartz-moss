@@ -186,16 +186,24 @@ groundGeo.translate(0, 0, -80);
 
 const SNOW_BASE  = new THREE.Color(0xeef4f7);
 const SNOW_SHADE = new THREE.Color(0xc7d6dc); // cooler/darker, pools in the undulation's low points
+// Factored out (not just inlined below) so anything else placed directly
+// on the ground -- lanterns, see below -- can sample the same undulation
+// instead of assuming a flat y=0, which trees get away with only because
+// they're tall enough (TRUNK_H=1.6) for the ~+-1.5 unit undulation range to
+// be a small fraction of their height.
+function groundHeightAt(x, z){
+  return Math.sin(x * 0.035 + 1.0) * 0.35
+       + Math.sin(z * 0.045 + 2.4) * 0.40
+       + Math.sin((x + z) * 0.021 + 0.7) * 0.50
+       + Math.sin((x - z) * 0.013 + 3.1) * 0.30;
+}
 {
   const pos = groundGeo.attributes.position;
   const colors = new Float32Array(pos.count * 3);
   const c = new THREE.Color();
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i), z = pos.getZ(i);
-    const h = Math.sin(x * 0.035 + 1.0) * 0.35
-            + Math.sin(z * 0.045 + 2.4) * 0.40
-            + Math.sin((x + z) * 0.021 + 0.7) * 0.50
-            + Math.sin((x - z) * 0.013 + 3.1) * 0.30;
+    const h = groundHeightAt(x, z);
     pos.setY(i, h);
     const t = THREE.MathUtils.clamp((h + 0.9) / 1.8, 0, 1);
     c.copy(SNOW_SHADE).lerp(SNOW_BASE, t);
@@ -1132,6 +1140,112 @@ cardMesh.frustumCulled = false;
 
 scene.add(trunkMesh, cardMesh);
 
+// ── Lanterns (Stage 2: model + placement only, no glow/light yet) ───────────────
+// One per tree, instanced the same way the trunk/cards are -- geometry stays
+// tiny and low-poly (a single revolved silhouette for the whole metal frame,
+// plus a separate cylinder for the glass and a small arc for the handle) so
+// 360 more instances cost almost nothing next to the canopy's ~60k cards.
+// Split into 3 InstancedMeshes purely by MATERIAL (opaque dark metal vs
+// translucent glass) -- draw-call count barely matters at this scale, but
+// material count does, and InstancedMesh only supports one material each.
+//
+// Frame profile (r, y) revolved around Y with THREE.LatheGeometry: a squat
+// foot, a thin bottom lip, a narrow waist (deliberately thinner than the
+// glass cylinder below, so the glass -- not bare metal -- reads as the
+// visible body there, matching the reference photos), a thin top lip, a
+// tapered cap, and a small chimney knob.
+const LANTERN_FRAME_PROFILE = [
+  [0.001, 0.000], [0.062, 0.005], [0.062, 0.030], [0.048, 0.035],
+  [0.048, 0.045], [0.025, 0.050], [0.025, 0.140], [0.048, 0.145],
+  [0.048, 0.155], [0.060, 0.160], [0.060, 0.170], [0.035, 0.200],
+  [0.012, 0.205], [0.012, 0.225], [0.001, 0.230],
+].map(([r, y]) => new THREE.Vector2(r, y));
+const lanternFrameGeo = new THREE.LatheGeometry(LANTERN_FRAME_PROFILE, 8);
+// Sits in the gap between the frame's narrow waist (r=0.025) and its lip
+// rings (r=0.048) -- a plain cylinder is enough, real refraction isn't
+// needed per the brief.
+const lanternGlassGeo = new THREE.CylinderGeometry(0.044, 0.044, 0.10, 8);
+lanternGlassGeo.translate(0, 0.095, 0); // spans y 0.045-0.145, matching the frame's lip-to-lip gap
+// A half-circle arc (arc=PI) starting at +X and ending at -X, sweeping
+// through +Y in between -- exactly a bucket-handle shape with no rotation
+// needed. radialSegments=4 gives a faceted (not round) wire, which is fine
+// at this size and matches the "keep it low-poly" brief. Radius 0.085 (not
+// a smaller value closer to the cap's own 0.06 width) so the arc peaks
+// above the chimney knob (y=0.225) rather than under it -- an earlier,
+// smaller radius left the handle shorter than the knob, backwards from the
+// reference photos where the handle is clearly the tallest feature.
+const lanternHandleGeo = new THREE.TorusGeometry(0.085, 0.007, 4, 8, Math.PI);
+lanternHandleGeo.translate(0, 0.165, 0); // feet planted at the cap's base width
+
+// Lightened from an initial 0x2b2a2e -- verified via gl.readPixels at
+// night that the darker tone crushed to literal (0,0,0), the same
+// low-poly-facet-vs-directional-light issue found and fixed for the
+// trunk earlier. Same standard applied here: this is a modest, good-faith
+// brighten (not chasing a some-facet-is-always-near-zero guarantee that
+// the trunk fix didn't achieve either), enough to read as dark metal in
+// daylight while staying distinguishable, not pure black, at night.
+const lanternMetalMat = new THREE.MeshStandardMaterial({ color: 0x4a4850, roughness: 0.55, metalness: 0.4 });
+// Deliberately NOT part of the day/night lerp system above -- Stage 2 asks
+// for the lantern to just be visible, unlit, in both states; the shared
+// scene lights (hemiLight/sky) already dim it appropriately at night the
+// same way they do the trunk, with no extra wiring needed here.
+const lanternGlassMat = new THREE.MeshStandardMaterial({
+  color: 0xd9a86c, roughness: 0.25, metalness: 0.0,
+  transparent: true, opacity: 0.6, side: THREE.DoubleSide,
+});
+
+const lanternFrameMesh = new THREE.InstancedMesh(lanternFrameGeo, lanternMetalMat, TREE_COUNT);
+const lanternGlassMesh = new THREE.InstancedMesh(lanternGlassGeo, lanternGlassMat, TREE_COUNT);
+const lanternHandleMesh = new THREE.InstancedMesh(lanternHandleGeo, lanternMetalMat, TREE_COUNT);
+// Lanterns don't move in this stage either -- same StaticDrawUsage hint
+// already used for trunkMesh above.
+lanternFrameMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+lanternGlassMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+lanternHandleMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+
+// Own seeded RNG, isolated from the shared rng()/range() stream -- this
+// runs AFTER treePlacements/scatterTrees/the tree-placement loop are fully
+// finished, but keeping every new randomness source on its own stream
+// (same pattern as rng9/rngBark above) means future edits here can never
+// accidentally reshuffle tree placement again, regardless of where in the
+// file this code ends up.
+const rngLantern = mulberry32(0x5f1000d);
+const rangeLantern = (a, b) => a + rngLantern() * (b - a);
+
+const lanternDummy = new THREE.Object3D();
+for (let i = 0; i < treePlacements.length; i++) {
+  const { x, z } = treePlacements[i];
+  // Offset from the trunk center, not centered/floating on it -- far enough
+  // to clear the trunk's own radius (max 0.32) with margin, close enough to
+  // still read as "resting at the base of this tree".
+  const dist = rangeLantern(0.38, 0.62);
+  const angle = rangeLantern(0, Math.PI * 2);
+  const lx = x + Math.cos(angle) * dist;
+  const lz = z + Math.sin(angle) * dist;
+  const lanternScale = rangeLantern(0.85, 1.2);
+  const lanternYaw = rangeLantern(0, Math.PI * 2);
+  // Unlike the trunk (placed flat at y=0 regardless of undulation -- fine
+  // for something 1.6+ units tall), the lantern is only ~0.2 units tall,
+  // small enough that the ground's own +-1.5 unit undulation would bury or
+  // float it entirely if not accounted for.
+  const ly = groundHeightAt(lx, lz);
+
+  lanternDummy.position.set(lx, ly, lz);
+  lanternDummy.rotation.set(0, lanternYaw, 0);
+  lanternDummy.scale.setScalar(lanternScale);
+  lanternDummy.updateMatrix();
+  lanternFrameMesh.setMatrixAt(i, lanternDummy.matrix);
+  lanternGlassMesh.setMatrixAt(i, lanternDummy.matrix);
+  lanternHandleMesh.setMatrixAt(i, lanternDummy.matrix);
+}
+lanternFrameMesh.count = treePlacements.length;
+lanternGlassMesh.count = treePlacements.length;
+lanternHandleMesh.count = treePlacements.length;
+lanternFrameMesh.instanceMatrix.needsUpdate = true;
+lanternGlassMesh.instanceMatrix.needsUpdate = true;
+lanternHandleMesh.instanceMatrix.needsUpdate = true;
+scene.add(lanternFrameMesh, lanternGlassMesh, lanternHandleMesh);
+
 // ── Falling snow ──────────────────────────────────────────────────────────────
 // Every particle's position is a closed-form function of uTime (straight
 // fall + wraparound loop + a per-particle sine-based horizontal drift/
@@ -1789,7 +1903,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future work ───────────────────────────────────────────
-window.__snow = { THREE, scene, camera, renderer, ground, groundMat, trunkMesh, trunkMat, barkTex, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, treeCardOrigin, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, HEIGHT_MULT, cardPlaceAAttr, cardPlaceBAttr, cardSlotSizeAttr, cardShakeAngleAttr, treeRenderOrder, blockPosOfTree, DUST_COUNT, DUST_TIER_PARTICLES, DUST_TIER_SIZE_MULT, dustPosAttr, dustSizeAttr, dustStartAttr, hemiLight, sky, CANOPY_GREEN, CANOPY_SNOW, toggleDayNight, updateDayNight, NIGHT_TRANSITION_DURATION, get nightMix(){ return nightMix; }, get nightMixTarget(){ return nightMixTarget; }, get simTime(){ return simTime; } };
+window.__snow = { THREE, scene, camera, renderer, ground, groundMat, trunkMesh, trunkMat, barkTex, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, treeCardOrigin, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, HEIGHT_MULT, cardPlaceAAttr, cardPlaceBAttr, cardSlotSizeAttr, cardShakeAngleAttr, treeRenderOrder, blockPosOfTree, DUST_COUNT, DUST_TIER_PARTICLES, DUST_TIER_SIZE_MULT, dustPosAttr, dustSizeAttr, dustStartAttr, hemiLight, sky, CANOPY_GREEN, CANOPY_SNOW, toggleDayNight, updateDayNight, NIGHT_TRANSITION_DURATION, get nightMix(){ return nightMix; }, get nightMixTarget(){ return nightMixTarget; }, lanternFrameMesh, lanternGlassMesh, lanternHandleMesh, lanternMetalMat, lanternGlassMat, get simTime(){ return simTime; } };
 </script>
 </body>
 </html>
