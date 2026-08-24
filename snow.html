@@ -553,7 +553,75 @@ const SNOW_BUILDUP_SPAN  = 15; // seconds to go from start to max coverage
 // above, which is the actual attribute the shader reads.
 const resetTimeAttr = new Float32Array(TREE_COUNT);
 
-const trunkMat = new THREE.MeshStandardMaterial({ color: 0x3b2e26, roughness: 0.95 });
+// Bark texture: procedural canvas grain + vertical grooves, same runtime-
+// generated approach as the ground's snow-grain texture above (no external
+// image assets, one-time load-time cost). Grayscale, centered on mid-gray
+// (128) so it reads as a neutral multiplier: used as `map` (multiplies
+// against trunkMat.color, same technique the ground's grain map uses
+// against its vertexColors) for tonal streaking, AND as `bumpMap` for
+// actual ridge/groove relief under the scene's lighting -- both reads are
+// effectively free since trunkMesh is one InstancedMesh / one draw call
+// regardless of texture complexity.
+function makeBarkTexture(size){
+  const cnv = document.createElement('canvas');
+  cnv.width = size; cnv.height = size * 2; // taller than wide -- grooves run vertically along the trunk
+  const ctx = cnv.getContext('2d');
+  ctx.fillStyle = 'rgb(128,128,128)';
+  ctx.fillRect(0, 0, cnv.width, cnv.height);
+
+  // Irregular-width vertical streaks (mostly darker/recessed than the base,
+  // a few lighter/raised), soft-edged via a gradient rather than a hard
+  // rectangle so they read as grooves, not stripes.
+  const grooveCount = 14;
+  for (let i = 0; i < grooveCount; i++) {
+    const x = (i / grooveCount) * cnv.width + range(-8, 8);
+    const w = range(3, 9);
+    const shade = clampByte(128 + range(-40, 26));
+    const grad = ctx.createLinearGradient(x - w, 0, x + w, 0);
+    grad.addColorStop(0, 'rgba(128,128,128,0)');
+    grad.addColorStop(0.5, `rgba(${shade},${shade},${shade},0.85)`);
+    grad.addColorStop(1, 'rgba(128,128,128,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(x - w, 0, w * 2, cnv.height);
+  }
+
+  // Fine per-pixel noise on top, for close-up grain -- same jitter idiom as
+  // makeSnowGrainTexture above.
+  const img = ctx.getImageData(0, 0, cnv.width, cnv.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const n = (rng() - 0.5) * 26;
+    d[i]   = clampByte(d[i] + n);
+    d[i+1] = clampByte(d[i+1] + n);
+    d[i+2] = clampByte(d[i+2] + n);
+  }
+  ctx.putImageData(img, 0, 0);
+
+  const tex = new THREE.CanvasTexture(cnv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const barkTex = makeBarkTexture(128);
+barkTex.repeat.set(3, 2); // a handful of grooves per repeat, tiled a couple of times up the trunk's height
+
+// Color lightened from the original 0x3b2e26 -- same category of fix as the
+// canopy's earlier lightening (see CANOPY_GREEN above): a direct A/B test
+// (temporarily swapping trunkMat.color to pure white while holding the
+// scene's lighting fixed) confirmed the lighting pipeline itself was fine,
+// but the original near-black albedo left NO headroom for the bark map/
+// bumpMap to show any visible variation -- multiplying the bark texture's
+// mid-gray average against that color rendered as literal (0,0,0), pure
+// black, at close range. This tone keeps a dark, believably-bark
+// brown while leaving enough dynamic range for the groove texture and bump
+// shading to actually read.
+const trunkMat = new THREE.MeshStandardMaterial({
+  color: 0x8a6f56,
+  roughness: 0.95,
+  map: barkTex,
+  bumpMap: barkTex,
+  bumpScale: 0.05,
+});
 
 // Back to alphaTest (was real alpha blending for a while). That earlier
 // switch traded away correct depth handling for softer edges: with
@@ -1142,14 +1210,25 @@ scene.add(snow);
 // ── Tap-to-dust-off ───────────────────────────────────────────────────────────
 // Tapping a tree resets its aResetTime (see cardMat.onBeforeCompile above)
 // so its own coverage curve restarts, independently of every other tree,
-// plus a brief particle burst at the tap point to sell "snow flicking off
-// branches". The burst is a small fixed pool of points recycled round-robin
-// across taps -- taps are rare, human-paced events, so there's no need for
-// the "thousands of particles" GPU-only discipline the falling snow needed;
-// a tiny CPU write of a few dozen values per tap is negligible.
-const DUST_PER_TAP = 36;
+// plus a brief particle burst -- spread across the whole canopy (see
+// treeCardOrigin/spawnDustBurst below), not just the exact tap point, so it
+// reads as the whole tree shedding snow rather than one poked spot -- to
+// sell "snow flicking off branches". The burst is a small fixed pool of
+// points recycled round-robin across taps -- taps are rare, human-paced
+// events, so there's no need for the "thousands of particles" GPU-only
+// discipline the falling snow needed; a tiny CPU write of a few dozen
+// values per tap is negligible.
+// Particle count AND per-particle size/speed scale with the tree's snow
+// coverage at the moment of tapping, using the same tier boundaries as the
+// tap-count system (applyTap): 66-100% biggest, 33-66% medium, 15-33%
+// smallest, 0-15% no burst at all (handleTap simply skips spawning below
+// that threshold, same as it already skips triggering anything else).
+const DUST_TIER_PARTICLES  = { 1: 16, 2: 34, 3: 60 };
+const DUST_TIER_SIZE_MULT  = { 1: 0.75, 2: 1.0, 3: 1.35 };
+const DUST_TIER_SPEED_MULT = { 1: 0.8, 2: 1.0, 3: 1.25 };
+const DUST_MAX_TIER_PARTICLES = 60;
 const DUST_MAX_CONCURRENT = 4; // a handful of taps in quick succession can be in flight at once without visibly stealing each other's particles
-const DUST_COUNT = DUST_PER_TAP * DUST_MAX_CONCURRENT;
+const DUST_COUNT = DUST_MAX_TIER_PARTICLES * DUST_MAX_CONCURRENT;
 const DUST_DURATION = 0.9; // seconds -- brief, per the brief's "keep it brief"
 
 const dustOrigins = new Float32Array(DUST_COUNT * 3);
@@ -1162,26 +1241,24 @@ const dustSize = new Float32Array(DUST_COUNT);
 // (past uDustDuration), until an actual tap writes a real start time.
 const DUST_INACTIVE_START = -1e6;
 const dustStart = new Float32Array(DUST_COUNT).fill(DUST_INACTIVE_START);
-for (let i = 0; i < DUST_COUNT; i++) {
-  // Rough upward+outward pop, like snow flicking off a tapped branch --
-  // randomized once per pool slot; reused each time that slot is recycled,
-  // which reads as fine natural variation given taps are infrequent.
-  const theta = rng() * Math.PI * 2;
-  const speedXZ = range(0.6, 2.2);
-  dustVel[i*3+0] = Math.cos(theta) * speedXZ;
-  dustVel[i*3+1] = range(0.8, 2.6);
-  dustVel[i*3+2] = Math.sin(theta) * speedXZ;
-  dustSize[i] = range(2.0, 4.5);
-}
+// position/vel/size are no longer randomized once per pool slot at load --
+// spawnDustBurst now writes fresh values (origin spread across the canopy,
+// tier-scaled speed/size) every time a slot is recycled, so their initial
+// contents here never actually get rendered (dustStart keeps them invisible
+// until a real spawn writes all four together).
 const dustGeo = new THREE.BufferGeometry();
 const dustPosAttr = new THREE.BufferAttribute(dustOrigins, 3);
 const dustStartAttr = new THREE.BufferAttribute(dustStart, 1);
+const dustVelAttr = new THREE.BufferAttribute(dustVel, 3);
+const dustSizeAttr = new THREE.BufferAttribute(dustSize, 1);
 dustPosAttr.setUsage(THREE.DynamicDrawUsage);
 dustStartAttr.setUsage(THREE.DynamicDrawUsage);
+dustVelAttr.setUsage(THREE.DynamicDrawUsage); // now rewritten per spawn (tier-scaled speed), unlike the old fixed-per-slot version
+dustSizeAttr.setUsage(THREE.DynamicDrawUsage); // now rewritten per spawn (tier-scaled size), unlike the old fixed-per-slot version
 dustGeo.setAttribute('position', dustPosAttr);
-dustGeo.setAttribute('aVel', new THREE.BufferAttribute(dustVel, 3));
+dustGeo.setAttribute('aVel', dustVelAttr);
 dustGeo.setAttribute('aStartTime', dustStartAttr);
-dustGeo.setAttribute('aSize', new THREE.BufferAttribute(dustSize, 1));
+dustGeo.setAttribute('aSize', dustSizeAttr);
 
 const dustMat = new THREE.ShaderMaterial({
   uniforms: {
@@ -1230,16 +1307,50 @@ const dust = new THREE.Points(dustGeo, dustMat);
 dust.frustumCulled = false; // same reasoning as `snow` above -- shader-displaced positions aren't reflected in the geometry's static bounding sphere
 scene.add(dust);
 
+// Approximates a card slot's world position -- mirrors the vertex shader's
+// own placement formula (cardMat.onBeforeCompile above) but evaluated once
+// in plain JS at spawn time, using the card's mid-height point (position.y
+// = 0.5 in shader terms) as a representative origin. Tilt/shake rotation is
+// deliberately skipped: this only needs to land visually within the
+// canopy's volume for a burst origin, not match a rendered card exactly.
+function treeCardOrigin(treeIdx, slotJ){
+  const idx = blockPosOfTree[treeIdx] * CARDS_PER_TREE + slotJ;
+  const treeX = cardPlaceAArr[idx*4], treeZ = cardPlaceAArr[idx*4+1], treeScale = cardPlaceAArr[idx*4+2], slotAngle = cardPlaceAArr[idx*4+3];
+  const slotRadius = cardPlaceBArr[idx*4], slotY = cardPlaceBArr[idx*4+1];
+  const cardH = cardSlotSizeArr[idx*2+1];
+  const midY = 0.5 * cardH * HEIGHT_MULT;
+  return {
+    x: Math.cos(slotAngle) * slotRadius * treeScale + treeX,
+    y: (midY + slotY * HEIGHT_MULT) * treeScale,
+    z: Math.sin(slotAngle) * slotRadius * treeScale + treeZ,
+  };
+}
+
 let dustCursor = 0;
-function spawnDustBurst(originPoint){
-  for (let k = 0; k < DUST_PER_TAP; k++){
+// tier: 1 (smallest) / 2 (medium) / 3 (biggest), from applyTap's per-tap
+// coverage check -- see the tier table above. Each particle gets its own
+// random canopy slot as its origin (not the tap point), so the burst reads
+// as the whole tree shedding snow.
+function spawnDustBurst(treeIdx, tier){
+  const count = DUST_TIER_PARTICLES[tier];
+  const sizeMult = DUST_TIER_SIZE_MULT[tier];
+  const speedMult = DUST_TIER_SPEED_MULT[tier];
+  for (let k = 0; k < count; k++){
     const j = dustCursor;
     dustCursor = (dustCursor + 1) % DUST_COUNT;
-    dustPosAttr.setXYZ(j, originPoint.x, originPoint.y, originPoint.z);
+    const slotJ = Math.floor(rng() * CARDS_PER_TREE);
+    const origin = treeCardOrigin(treeIdx, slotJ);
+    dustPosAttr.setXYZ(j, origin.x, origin.y, origin.z);
     dustStartAttr.setX(j, simTime);
+    const theta = rng() * Math.PI * 2;
+    const speedXZ = range(0.6, 2.2) * speedMult;
+    dustVelAttr.setXYZ(j, Math.cos(theta) * speedXZ, range(0.8, 2.6) * speedMult, Math.sin(theta) * speedXZ);
+    dustSizeAttr.setX(j, range(2.0, 4.5) * sizeMult);
   }
   dustPosAttr.needsUpdate = true;
   dustStartAttr.needsUpdate = true;
+  dustVelAttr.needsUpdate = true;
+  dustSizeAttr.needsUpdate = true;
 }
 
 // ── Multi-tap dusting state machine ──────────────────────────────────────────
@@ -1302,16 +1413,22 @@ function updateTapFades(now){
   cardResetTimeAttr.needsUpdate = true;
 }
 
-// Applies one tap to tree `i`. Returns true if it actually registered
-// (false if it was ignored: still on cooldown, or the tree is already bare).
+// Applies one tap to tree `i`. Returns { registered, tier }: registered is
+// false if the tap was ignored (still on cooldown, or the tree already
+// bare); tier is the dust-burst intensity for THIS tap specifically (1
+// smallest / 2 medium / 3 biggest / 0 no burst), from coverage at the
+// moment of tapping -- separate from (though using the same boundaries as)
+// the per-sequence tap-count tier fixed below, since a multi-tap sequence's
+// later taps see progressively lower live coverage and should burst
+// smaller accordingly, not all match the first tap's tier.
 function applyTap(i, now){
   const state = tapState[i] || (tapState[i] = { tapsRemaining: 0, perTapRemoval: 0, lastTapTime: -Infinity });
-  if (now - state.lastTapTime < TAP_COOLDOWN) return false;
+  if (now - state.lastTapTime < TAP_COOLDOWN) return { registered: false, tier: 0 };
 
   const current = coverageNow(i, now);
+  const frac = current / SNOW_BUILDUP_MAX;
   if (state.tapsRemaining <= 0) {
-    const frac = current / SNOW_BUILDUP_MAX;
-    if (frac <= 0.15) return false; // 0-15%: tapping does nothing, no cooldown consumed either
+    if (frac <= 0.15) return { registered: false, tier: 0 }; // 0-15%: tapping does nothing, no cooldown consumed either
     // Tap tier + per-tap removal are fixed from coverage AT THIS FIRST TAP
     // of the sequence; later taps in the same sequence reuse this same
     // perTapRemoval even as natural buildup keeps nudging live coverage up.
@@ -1320,6 +1437,11 @@ function applyTap(i, now){
     state.tapsRemaining = requiredTaps;
     state.perTapRemoval = current / requiredTaps;
   }
+
+  // Dust-burst tier for this specific tap -- same 15/33/66% boundaries as
+  // above, but evaluated fresh against live coverage rather than reusing
+  // the frozen per-sequence tier.
+  const tier = frac <= 0.15 ? 0 : frac > 2/3 ? 3 : frac > 1/3 ? 2 : 1;
 
   state.lastTapTime = now;
   state.tapsRemaining -= 1;
@@ -1332,7 +1454,7 @@ function applyTap(i, now){
   // actually overlap in practice; this still resolves sanely if that ever
   // changes, by just restarting the fade from wherever it currently is.
   activeFades.set(i, { fadeStartTime: now, fadeStartCoverage: current, fadeTargetCoverage: target });
-  return true;
+  return { registered: true, tier };
 }
 
 // ── Dusting shake ────────────────────────────────────────────────────────────
@@ -1411,9 +1533,9 @@ function handleTap(clientX, clientY){
   const blockPos = Math.floor(cardIdx / CARDS_PER_TREE);
   if (blockPos >= treeRenderOrder.length) return null;
   const i = treeRenderOrder[blockPos];
-  const registered = applyTap(i, simTime);
+  const { registered, tier } = applyTap(i, simTime);
   if (registered) {
-    spawnDustBurst(hit.point);
+    if (tier > 0) spawnDustBurst(i, tier);
     triggerShake(i, simTime);
   }
   return registered ? i : null;
@@ -1458,7 +1580,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future work ───────────────────────────────────────────
-window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, HEIGHT_MULT, cardPlaceAAttr, cardPlaceBAttr, cardSlotSizeAttr, cardShakeAngleAttr, treeRenderOrder, blockPosOfTree, get simTime(){ return simTime; } };
+window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, trunkMat, barkTex, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, treeCardOrigin, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, HEIGHT_MULT, cardPlaceAAttr, cardPlaceBAttr, cardSlotSizeAttr, cardShakeAngleAttr, treeRenderOrder, blockPosOfTree, DUST_COUNT, DUST_TIER_PARTICLES, DUST_TIER_SIZE_MULT, dustPosAttr, dustSizeAttr, dustStartAttr, get simTime(){ return simTime; } };
 </script>
 </body>
 </html>
