@@ -1222,7 +1222,10 @@ for (let i = 0; i < treePlacements.length; i++) {
   const angle = rangeLantern(0, Math.PI * 2);
   const lx = x + Math.cos(angle) * dist;
   const lz = z + Math.sin(angle) * dist;
-  const lanternScale = rangeLantern(0.85, 1.2);
+  // Range shifted up (was 0.85-1.2) for a modest overall size increase --
+  // same width, same rng() draw position in the sequence, so dist/angle/yaw
+  // for every tree are completely unaffected.
+  const lanternScale = rangeLantern(1.0, 1.45);
   const lanternYaw = rangeLantern(0, Math.PI * 2);
   // Unlike the trunk (placed flat at y=0 regardless of undulation -- fine
   // for something 1.6+ units tall), the lantern is only ~0.2 units tall,
