@@ -19,11 +19,15 @@
   }
   /* Cool, light edge darkening rather than a dark dramatic vignette -- the
      brief is "bright and calm, not dim or moody", so this only needs to
-     softly draw the eye inward, not shade the scene down. */
+     softly draw the eye inward, not shade the scene down. Color stops are
+     CSS custom properties (defaulting to these exact original values, so
+     daytime is pixel-identical to before) -- the day/night toggle below
+     overrides them at night, since this same light-gray tint read as a
+     bright ring against the dark night sky instead of a vignette. */
   #vignette{
     position:fixed; inset:0; pointer-events:none; z-index:5;
     background:radial-gradient(ellipse 100% 90% at 50% 45%,
-      transparent 55%, rgba(170,190,200,0.22) 82%, rgba(150,172,185,0.38) 100%);
+      transparent 55%, var(--vig-c1, rgba(170,190,200,0.22)) 82%, var(--vig-c2, rgba(150,172,185,0.38)) 100%);
   }
   #fps{
     position:fixed; top:8px; left:8px; z-index:9999;
@@ -1681,6 +1685,29 @@ const NIGHT_CANOPY_GREEN = new THREE.Color(0x1c2a28);
 const DAY_CANOPY_SNOW    = CANOPY_SNOW.clone();
 const NIGHT_CANOPY_SNOW  = new THREE.Color(0xb9cbdc);
 
+// #vignette's two gradient stops (see the CSS above) are plain [r,g,b,a]
+// arrays, not THREE.Color, since CSS custom properties need a formatted
+// rgba() string rather than a hex value, and alpha itself needs to lerp
+// too. Fixes a real bug found after Stage 1 shipped: the vignette's fixed
+// light-gray tint was tuned to read as a subtle darkening against the
+// light day sky, but against the dark night sky it read as a distinct
+// bright ring instead -- confirmed by A/B toggling the vignette element's
+// visibility and comparing screenshots. Night values darken toward the
+// night sky's own tone instead, so it functions as an actual vignette at
+// night rather than an inverted one.
+const DAY_VIGNETTE_C1   = [170, 190, 200, 0.22];
+const NIGHT_VIGNETTE_C1 = [4, 8, 14, 0.30];
+const DAY_VIGNETTE_C2   = [150, 172, 185, 0.38];
+const NIGHT_VIGNETTE_C2 = [2, 4, 8, 0.50];
+const vignetteEl = document.getElementById('vignette');
+function lerpRgba(a, b, t){
+  const r = Math.round(a[0] + (b[0] - a[0]) * t);
+  const g = Math.round(a[1] + (b[1] - a[1]) * t);
+  const bch = Math.round(a[2] + (b[2] - a[2]) * t);
+  const al = a[3] + (b[3] - a[3]) * t;
+  return `rgba(${r},${g},${bch},${al.toFixed(3)})`;
+}
+
 const NIGHT_TRANSITION_DURATION = 1.8; // seconds -- animated fade, not an instant snap
 let nightMix = 0, nightMixTarget = 0, nightMixStart = 0, nightTransitionStartTime = 0;
 
@@ -1713,6 +1740,8 @@ function updateDayNight(now){
   trunkMat.color.lerpColors(DAY_TRUNK_COLOR, NIGHT_TRUNK_COLOR, nightMix);
   CANOPY_GREEN.lerpColors(DAY_CANOPY_GREEN, NIGHT_CANOPY_GREEN, nightMix);
   CANOPY_SNOW.lerpColors(DAY_CANOPY_SNOW, NIGHT_CANOPY_SNOW, nightMix);
+  vignetteEl.style.setProperty('--vig-c1', lerpRgba(DAY_VIGNETTE_C1, NIGHT_VIGNETTE_C1, nightMix));
+  vignetteEl.style.setProperty('--vig-c2', lerpRgba(DAY_VIGNETTE_C2, NIGHT_VIGNETTE_C2, nightMix));
 }
 
 const daynightBtn = document.getElementById('daynight-btn');
