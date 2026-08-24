@@ -298,8 +298,25 @@ const HEIGHT_MULT = 1.65;
 // gets the same treatment here, for a distinct gap reported partway up
 // the trunk, below the main canopy mass -- a different zone than the
 // base band already fixed.
+// band0's sizeMult raised again here (1.35->1.9) -- widening
+// TRUNK_R_TOP/BOTTOM elsewhere in this file made the trunk's existing
+// (unchanged) band0 angular gaps show noticeably more bare trunk through
+// them than before, since the same gap now has more trunk width behind it.
+// Confirmed via the same angular-gap analysis used for the tree-9
+// investigation earlier in this project, run across all 360 trees: ~22
+// trees have the camera bearing landing inside band0's ~30-degree
+// worst-case gap, closely matching a reported gap on a tree left of the
+// frame's center. Deliberately NOT touching band0's `count` here (unlike
+// earlier band-boost fixes in this project) -- CARD_SLOTS is built from
+// the same shared seeded RNG stream that scatterTrees/treePlacements draws
+// from immediately afterward, and changing a loop's ITERATION COUNT (not
+// just the multiplier applied to each already-drawn value) would shift
+// every subsequent draw, silently reshuffling tree placement again --
+// exactly the class of bug just found and fixed for the bark texture
+// above. sizeMult alone doesn't change how many range() calls this loop
+// makes, only what they're multiplied by, so it's free of that risk.
 const CARD_BANDS = [
-  { yFrac: 0.00, radius: TIER1_R * 0.95, count: 42, sizeMult: 1.35 },
+  { yFrac: 0.00, radius: TIER1_R * 0.95, count: 42, sizeMult: 1.9 },
   { yFrac: 0.22, radius: TIER1_R * 0.80, count: 36, sizeMult: 1.3 },
   { yFrac: 0.38, radius: TIER1_R * 0.60, count: 24 },
   { yFrac: 0.55, radius: TIER2_R * 0.90, count: 20 },
@@ -566,6 +583,20 @@ const resetTimeAttr = new Float32Array(TREE_COUNT);
 // actual ridge/groove relief under the scene's lighting -- both reads are
 // effectively free since trunkMesh is one InstancedMesh / one draw call
 // regardless of texture complexity.
+// Uses its OWN seeded RNG (rngBark/rangeBark), NOT the shared rng()/range()
+// -- this function runs before scatterTrees() and the per-tree placement
+// loop later in the file, and its per-pixel noise loop alone draws tens of
+// thousands of times from whatever stream it uses. Discovered the hard way:
+// an earlier version of this function used the SHARED rng() here, which
+// silently shifted every later draw from that stream -- reshuffling all
+// (non-overridden) tree positions and every tree's scale/rotation/tint,
+// even though no placement CODE changed. Confirmed via a full treePlacements
+// fingerprint diff against the last user-confirmed-correct commit. A
+// dedicated stream (same pattern as rng9 for the tree-9 fix earlier in this
+// project) makes this function's own randomness completely inconsequential
+// to anything downstream.
+const rngBark = mulberry32(0x5f1000b);
+const rangeBark = (a, b) => a + rngBark() * (b - a);
 function makeBarkTexture(size){
   const cnv = document.createElement('canvas');
   cnv.width = size; cnv.height = size * 2; // taller than wide -- grooves run vertically along the trunk
@@ -575,26 +606,31 @@ function makeBarkTexture(size){
 
   // Irregular-width vertical streaks (mostly darker/recessed than the base,
   // a few lighter/raised), soft-edged via a gradient rather than a hard
-  // rectangle so they read as grooves, not stripes.
-  const grooveCount = 14;
+  // rectangle so they read as grooves, not stripes. Count/contrast/opacity
+  // all raised beyond the original pass (grooveCount 14->20, shade spread
+  // -40..26 -> -70..55, gradient opacity 0.85->1.0) -- the first version's
+  // detail was too subtle to read clearly even once the base color fix made
+  // it visible at all.
+  const grooveCount = 20;
   for (let i = 0; i < grooveCount; i++) {
-    const x = (i / grooveCount) * cnv.width + range(-8, 8);
-    const w = range(3, 9);
-    const shade = clampByte(128 + range(-40, 26));
+    const x = (i / grooveCount) * cnv.width + rangeBark(-8, 8);
+    const w = rangeBark(3, 10);
+    const shade = clampByte(128 + rangeBark(-70, 55));
     const grad = ctx.createLinearGradient(x - w, 0, x + w, 0);
     grad.addColorStop(0, 'rgba(128,128,128,0)');
-    grad.addColorStop(0.5, `rgba(${shade},${shade},${shade},0.85)`);
+    grad.addColorStop(0.5, `rgba(${shade},${shade},${shade},1.0)`);
     grad.addColorStop(1, 'rgba(128,128,128,0)');
     ctx.fillStyle = grad;
     ctx.fillRect(x - w, 0, w * 2, cnv.height);
   }
 
   // Fine per-pixel noise on top, for close-up grain -- same jitter idiom as
-  // makeSnowGrainTexture above.
+  // makeSnowGrainTexture above. Amplitude raised (26->48) alongside the
+  // groove contrast increase.
   const img = ctx.getImageData(0, 0, cnv.width, cnv.height);
   const d = img.data;
   for (let i = 0; i < d.length; i += 4) {
-    const n = (rng() - 0.5) * 26;
+    const n = (rngBark() - 0.5) * 48;
     d[i]   = clampByte(d[i] + n);
     d[i+1] = clampByte(d[i+1] + n);
     d[i+2] = clampByte(d[i+2] + n);
@@ -624,7 +660,7 @@ const trunkMat = new THREE.MeshStandardMaterial({
   roughness: 0.95,
   map: barkTex,
   bumpMap: barkTex,
-  bumpScale: 0.05,
+  bumpScale: 0.09, // raised alongside the texture's own contrast increase above
 });
 
 // Back to alphaTest (was real alpha blending for a while). That earlier
@@ -1227,14 +1263,15 @@ scene.add(snow);
 // tap-count system (applyTap): 66-100% biggest, 33-66% medium, 15-33%
 // smallest, 0-15% no burst at all (handleTap simply skips spawning below
 // that threshold, same as it already skips triggering anything else).
-// Counts raised and size multipliers cut (both, per an explicit follow-up
-// request) so bursts read as fine/powdery rather than a moderate number of
-// chunky dots -- speed multipliers below are untouched, not part of that
-// request.
-const DUST_TIER_PARTICLES  = { 1: 40, 2: 85, 3: 150 };
-const DUST_TIER_SIZE_MULT  = { 1: 0.3, 2: 0.4, 3: 0.5 };
+// Counts raised and size multipliers cut again, well beyond the previous
+// pass (which wasn't nearly enough per explicit feedback) -- particle
+// counts roughly 3x higher again, size multipliers roughly 2.5x smaller
+// again, so bursts read as fine/powdery rather than "more dots". Speed
+// multipliers below are untouched, not part of this request.
+const DUST_TIER_PARTICLES  = { 1: 120, 2: 260, 3: 450 };
+const DUST_TIER_SIZE_MULT  = { 1: 0.12, 2: 0.16, 3: 0.2 };
 const DUST_TIER_SPEED_MULT = { 1: 0.8, 2: 1.0, 3: 1.25 };
-const DUST_MAX_TIER_PARTICLES = 150;
+const DUST_MAX_TIER_PARTICLES = 450;
 const DUST_MAX_CONCURRENT = 4; // a handful of taps in quick succession can be in flight at once without visibly stealing each other's particles
 const DUST_COUNT = DUST_MAX_TIER_PARTICLES * DUST_MAX_CONCURRENT;
 const DUST_DURATION = 0.9; // seconds -- brief, per the brief's "keep it brief"
