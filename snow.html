@@ -655,8 +655,12 @@ barkTex.repeat.set(3, 2); // a handful of grooves per repeat, tiled a couple of 
 // black, at close range. This tone keeps a dark, believably-bark
 // brown while leaving enough dynamic range for the groove texture and bump
 // shading to actually read.
+// Lightened again from 0x8a6f56 -- a modest ~10% blend toward white,
+// same hue ratio preserved, not a hue change. Groove/noise contrast on
+// barkTex is a much wider swing (roughly +-70 gray levels) than this base
+// tone shifted, so detail stays clearly visible on top of it.
 const trunkMat = new THREE.MeshStandardMaterial({
-  color: 0x8a6f56,
+  color: 0x967d67,
   roughness: 0.95,
   map: barkTex,
   bumpMap: barkTex,
@@ -915,6 +919,21 @@ treePlacements[346] = { x: -8.890171657648896, z: -39.79963279848468 };
 treePlacements[281] = { x: -2.7999361512911047, z: -38.18645063716067 };
 treePlacements[350] = { x: -15.576773008980547, z: -40.07428469916258 };
 treePlacements[169] = { x: 0.4231123875699341, z: -38.67492343526442 };
+
+// Bring the whole forest closer to the camera, uniformly -- a plain
+// translation applied to every tree's z AFTER scatterTrees() and all the
+// per-tree overrides above have finished, so relative spacing/arrangement
+// between every tree is untouched (this is pure post-hoc geometry, not a
+// re-scatter, and consumes no RNG draws, so it can't reintroduce the
+// draw-order fragility found and fixed earlier in this project). Capped at
+// 2.0: the closest a tree is allowed to spawn is z=6 (FIELD_Z_NEAR above),
+// only 3 units of z clearance from the camera at z=9 -- a bigger shift
+// risks pushing the nearest possible tree past the camera's z-plane
+// entirely (behind it, since the camera looks toward -z), so 2.0 leaves a
+// safe ~1.3-unit margin while still bringing every tree meaningfully
+// closer (proportionally more so for the near trees that matter most).
+const FOREST_Z_SHIFT = 2.0;
+for (const p of treePlacements) p.z += FOREST_Z_SHIFT;
 
 // Card instances are grouped into one fixed-size block per tree, but the
 // BLOCK ORDER is sorted back-to-front by distance from the camera --
