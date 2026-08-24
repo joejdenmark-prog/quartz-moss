@@ -31,12 +31,33 @@
     background:rgba(20,30,36,0.55); padding:4px 8px; border-radius:4px;
     pointer-events:none; white-space:pre;
   }
+  /* Same circular floating-button pattern as lava.html's #reset-btn --
+     translucent frosted panel, plain glyph, hover/active feedback. */
+  #daynight-btn{
+    position:fixed; bottom:24px; right:24px; width:46px; height:46px;
+    border-radius:50%;
+    border:1px solid rgba(255,255,255,0.35);
+    background:rgba(20,30,36,0.55);
+    color:rgba(234,242,246,0.9);
+    font-size:20px; line-height:1;
+    display:flex; align-items:center; justify-content:center;
+    cursor:pointer;
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    transition:opacity .25s ease, transform .14s ease;
+    opacity:.75; z-index:100; user-select:none;
+    -webkit-tap-highlight-color:transparent; touch-action:manipulation;
+  }
+  #daynight-btn:hover  { opacity:1; }
+  #daynight-btn:active { transform:scale(.9); opacity:1; }
 </style>
 </head>
 <body>
 <canvas id="canvas"></canvas>
 <div id="vignette"></div>
 <div id="fps">-- fps</div>
+<!-- Glyph shows the state a click switches TO (moon while it's day, sun
+     while it's night), same convention as most day/night toggles. -->
+<button id="daynight-btn" title="Toggle day/night">☾</button>
 
 <script type="importmap">
 { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
@@ -132,7 +153,10 @@ if (window.visualViewport) {
 // the dominant source (well above the directional light's intensity below)
 // so the scene reads as bright, even, ambient daylight rather than lit from
 // one particular direction.
-scene.add(new THREE.HemisphereLight(0xdce8ee, 0xb7bfae, 1.15));
+// Named (not added anonymously) so the day/night toggle below can animate
+// its color/intensity.
+const hemiLight = new THREE.HemisphereLight(0xdce8ee, 0xb7bfae, 1.15);
+scene.add(hemiLight);
 // A very weak, low directional light — not to cast shadows (there are none),
 // just to give the tree canopies and ground undulation a faint sense of
 // form/gradient so they don't read as completely flat. Positioned high and
@@ -1612,6 +1636,91 @@ function handleTap(clientX, clientY){
 }
 canvas.addEventListener('pointerdown', (e) => { handleTap(e.clientX, e.clientY); });
 
+// ── Day/night toggle ─────────────────────────────────────────────────────────
+// Stage 1: just the toggle mechanism and lighting transition -- no lanterns
+// yet (that's a later stage). Every day/night-affected color is driven from
+// ONE shared mix value (nightMix, 0=day/1=night) via lerpColors on the
+// SAME live objects the rest of the scene already reads every frame
+// (scene.background, scene.fog.color, hemiLight/sky's own color+intensity,
+// groundMat.color, trunkMat.color, and CANOPY_GREEN/CANOPY_SNOW -- the
+// latter two are the literal objects cardMat's patched shader already reads
+// as uCanopyGreen/uCanopySnow, see cardMat.onBeforeCompile above, so
+// mutating them in place needs no separate uniform-sync step). Night
+// values are dim and cool, not literal black, so trees/ground stay
+// faintly visible in outline -- exactly what's needed before lanterns
+// exist to light anything.
+const DAY_SKY_COLOR      = new THREE.Color(SKY_COLOR);
+const NIGHT_SKY_COLOR    = new THREE.Color(0x0d1826);
+const DAY_HEMI_SKY       = new THREE.Color(0xdce8ee);
+const NIGHT_HEMI_SKY     = new THREE.Color(0x1c2c40);
+const DAY_HEMI_GROUND    = new THREE.Color(0xb7bfae);
+const NIGHT_HEMI_GROUND  = new THREE.Color(0x3a4250);
+const DAY_HEMI_INTENSITY = 1.15;
+// Verified via live pixel A/B testing (gl.readPixels) that the initial,
+// intuitively-"dim moonlit" guesses here (0.4 intensity, 0x11151c ground
+// term, 0x4a5b74 ground tint) rendered as literal (0,0,0) on screen --
+// ACESFilmicToneMapping's toe crushes very low linear values straight to
+// black well before they'd look merely "dim". Pushed up further still
+// after finding the low-poly hexagonal trunk's worst-lit facet (viewed
+// close and near-edge-on, where it gets ~zero direct light and only a
+// grazing hemisphere contribution) STILL crushed to black at the first,
+// smaller bump -- these are the values where even that worst-case facet
+// shows real, screenshot-confirmed groove detail, while the full default-
+// camera scene still reads as genuine, convincingly dark nighttime.
+const NIGHT_HEMI_INTENSITY = 0.75;
+const DAY_SUN_COLOR      = new THREE.Color(0xf3f8fb);
+const NIGHT_SUN_COLOR    = new THREE.Color(0xaac4e6); // same directional light doubles as pale moonlight at night
+const DAY_SUN_INTENSITY  = 0.35;
+const NIGHT_SUN_INTENSITY = 0.16;
+const DAY_GROUND_TINT    = new THREE.Color(0xffffff); // groundMat.color defaults to white -- a no-op multiply against the existing vertex-color/grain-texture shading
+const NIGHT_GROUND_TINT  = new THREE.Color(0xb5c2d2);
+const DAY_TRUNK_COLOR    = trunkMat.color.clone();
+const NIGHT_TRUNK_COLOR  = new THREE.Color(0xc8c0d0);
+const DAY_CANOPY_GREEN   = CANOPY_GREEN.clone();
+const NIGHT_CANOPY_GREEN = new THREE.Color(0x1c2a28);
+const DAY_CANOPY_SNOW    = CANOPY_SNOW.clone();
+const NIGHT_CANOPY_SNOW  = new THREE.Color(0xb9cbdc);
+
+const NIGHT_TRANSITION_DURATION = 1.8; // seconds -- animated fade, not an instant snap
+let nightMix = 0, nightMixTarget = 0, nightMixStart = 0, nightTransitionStartTime = 0;
+
+function toggleDayNight(){
+  nightMixTarget = nightMixTarget === 1 ? 0 : 1;
+  nightMixStart = nightMix;
+  nightTransitionStartTime = simTime;
+}
+
+function updateDayNight(now){
+  if (nightMix === nightMixTarget) return; // settled -- nothing to animate, so idle cost is just this one check
+  const elapsed = now - nightTransitionStartTime;
+  const p = Math.min(1, elapsed / NIGHT_TRANSITION_DURATION);
+  if (p >= 1) {
+    nightMix = nightMixTarget; // snap exactly, not whatever floating-point the lerp below would leave it at, so the early-return check above is reliable
+  } else {
+    const eased = p * p * (3 - 2 * p); // smoothstep -- same easing idiom used for tap fades elsewhere in this scene
+    nightMix = nightMixStart + (nightMixTarget - nightMixStart) * eased;
+  }
+
+  scene.background.lerpColors(DAY_SKY_COLOR, NIGHT_SKY_COLOR, nightMix);
+  scene.fog.color.lerpColors(DAY_SKY_COLOR, NIGHT_SKY_COLOR, nightMix);
+  snowMat.uniforms.uFogColor.value.lerpColors(DAY_SKY_COLOR, NIGHT_SKY_COLOR, nightMix);
+  hemiLight.color.lerpColors(DAY_HEMI_SKY, NIGHT_HEMI_SKY, nightMix);
+  hemiLight.groundColor.lerpColors(DAY_HEMI_GROUND, NIGHT_HEMI_GROUND, nightMix);
+  hemiLight.intensity = THREE.MathUtils.lerp(DAY_HEMI_INTENSITY, NIGHT_HEMI_INTENSITY, nightMix);
+  sky.color.lerpColors(DAY_SUN_COLOR, NIGHT_SUN_COLOR, nightMix);
+  sky.intensity = THREE.MathUtils.lerp(DAY_SUN_INTENSITY, NIGHT_SUN_INTENSITY, nightMix);
+  groundMat.color.lerpColors(DAY_GROUND_TINT, NIGHT_GROUND_TINT, nightMix);
+  trunkMat.color.lerpColors(DAY_TRUNK_COLOR, NIGHT_TRUNK_COLOR, nightMix);
+  CANOPY_GREEN.lerpColors(DAY_CANOPY_GREEN, NIGHT_CANOPY_GREEN, nightMix);
+  CANOPY_SNOW.lerpColors(DAY_CANOPY_SNOW, NIGHT_CANOPY_SNOW, nightMix);
+}
+
+const daynightBtn = document.getElementById('daynight-btn');
+daynightBtn.addEventListener('click', () => {
+  toggleDayNight();
+  daynightBtn.textContent = nightMixTarget === 1 ? '☀' : '☾';
+});
+
 // ── FPS readout ───────────────────────────────────────────────────────────────
 const fpsEl = document.getElementById('fps');
 let fpsFrames = 0, fpsAccum = 0;
@@ -1639,6 +1748,7 @@ renderer.setAnimationLoop(() => {
   if (cardMat.userData.shader) cardMat.userData.shader.uniforms.uTime.value = simTime;
   updateTapFades(simTime);
   updateShakes(simTime);
+  updateDayNight(simTime);
 
   renderer.render(scene, camera);
 
@@ -1650,7 +1760,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future work ───────────────────────────────────────────
-window.__snow = { THREE, scene, camera, renderer, ground, trunkMesh, trunkMat, barkTex, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, treeCardOrigin, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, HEIGHT_MULT, cardPlaceAAttr, cardPlaceBAttr, cardSlotSizeAttr, cardShakeAngleAttr, treeRenderOrder, blockPosOfTree, DUST_COUNT, DUST_TIER_PARTICLES, DUST_TIER_SIZE_MULT, dustPosAttr, dustSizeAttr, dustStartAttr, get simTime(){ return simTime; } };
+window.__snow = { THREE, scene, camera, renderer, ground, groundMat, trunkMesh, trunkMat, barkTex, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, treeCardOrigin, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, HEIGHT_MULT, cardPlaceAAttr, cardPlaceBAttr, cardSlotSizeAttr, cardShakeAngleAttr, treeRenderOrder, blockPosOfTree, DUST_COUNT, DUST_TIER_PARTICLES, DUST_TIER_SIZE_MULT, dustPosAttr, dustSizeAttr, dustStartAttr, hemiLight, sky, CANOPY_GREEN, CANOPY_SNOW, toggleDayNight, updateDayNight, NIGHT_TRANSITION_DURATION, get nightMix(){ return nightMix; }, get nightMixTarget(){ return nightMixTarget; }, get simTime(){ return simTime; } };
 </script>
 </body>
 </html>
