@@ -240,7 +240,11 @@ scene.add(ground);
 // billboard matrix math in the vertex shader for no real benefit here.
 const TREE_COUNT = 360;
 
-const TRUNK_H = 1.6, TRUNK_R_TOP = 0.09, TRUNK_R_BOTTOM = 0.14;
+// Radius only (not TRUNK_H) increased for bark visibility -- height feeds
+// CANOPY_Y_BOTTOM/TIER1_BASE_Y below, so changing it would shift canopy
+// positioning and risk reopening the base-band gap work from earlier in
+// this project; radius alone doesn't touch any of that.
+const TRUNK_H = 1.6, TRUNK_R_TOP = 0.22, TRUNK_R_BOTTOM = 0.32;
 const trunkGeo = new THREE.CylinderGeometry(TRUNK_R_TOP, TRUNK_R_BOTTOM, TRUNK_H, 6, 1);
 trunkGeo.translate(0, TRUNK_H / 2, 0); // base sits at local y=0 so it starts right at the ground
 
@@ -1223,10 +1227,14 @@ scene.add(snow);
 // tap-count system (applyTap): 66-100% biggest, 33-66% medium, 15-33%
 // smallest, 0-15% no burst at all (handleTap simply skips spawning below
 // that threshold, same as it already skips triggering anything else).
-const DUST_TIER_PARTICLES  = { 1: 16, 2: 34, 3: 60 };
-const DUST_TIER_SIZE_MULT  = { 1: 0.75, 2: 1.0, 3: 1.35 };
+// Counts raised and size multipliers cut (both, per an explicit follow-up
+// request) so bursts read as fine/powdery rather than a moderate number of
+// chunky dots -- speed multipliers below are untouched, not part of that
+// request.
+const DUST_TIER_PARTICLES  = { 1: 40, 2: 85, 3: 150 };
+const DUST_TIER_SIZE_MULT  = { 1: 0.3, 2: 0.4, 3: 0.5 };
 const DUST_TIER_SPEED_MULT = { 1: 0.8, 2: 1.0, 3: 1.25 };
-const DUST_MAX_TIER_PARTICLES = 60;
+const DUST_MAX_TIER_PARTICLES = 150;
 const DUST_MAX_CONCURRENT = 4; // a handful of taps in quick succession can be in flight at once without visibly stealing each other's particles
 const DUST_COUNT = DUST_MAX_TIER_PARTICLES * DUST_MAX_CONCURRENT;
 const DUST_DURATION = 0.9; // seconds -- brief, per the brief's "keep it brief"
