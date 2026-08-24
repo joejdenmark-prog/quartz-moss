@@ -244,7 +244,7 @@ const TRUNK_H = 1.6, TRUNK_R_TOP = 0.09, TRUNK_R_BOTTOM = 0.14;
 const trunkGeo = new THREE.CylinderGeometry(TRUNK_R_TOP, TRUNK_R_BOTTOM, TRUNK_H, 6, 1);
 trunkGeo.translate(0, TRUNK_H / 2, 0); // base sits at local y=0 so it starts right at the ground
 
-const CANOPY_GREEN = new THREE.Color(0x44543f); // muted, cool-toned green -- overcast winter light, not a saturated summer green
+const CANOPY_GREEN = new THREE.Color(0x6a8560); // lightened from 0x44543f -- same hue/ratio (G>R>B), just brighter, so bare-tree texture/shape reads clearly at zero snow coverage instead of going dark and hard to make out
 const CANOPY_SNOW  = new THREE.Color(0xeef3f2); // pale snow-dusted tips
 
 // Same overall canopy envelope the earlier two-tier cones used, kept only
@@ -311,9 +311,15 @@ for (const band of CARD_BANDS) {
     const r = band.radius * range(0.85, 1.15);
     // Sized against the vertical gap between bands (not the whole canopy
     // radius) -- modest, roughly clump-sized absolute dimensions, small and
-    // numerous enough to overlap into continuous-looking foliage.
-    const w = range(0.52, 0.80) * sizeMult;
-    const h = range(0.48, 0.70) * sizeMult;
+    // numerous enough to overlap into continuous-looking foliage. Base
+    // range nudged up slightly (was 0.52-0.80 / 0.48-0.70) -- with the
+    // per-tree yaw fix, coverage now varies naturally tree to tree instead
+    // of every tree sharing the same weak point, but that means the worst-
+    // case low end of that natural variance can still show a thin tree
+    // here and there. Raising the floor a bit (not a targeted band
+    // override this time) tightens that low end across the board.
+    const w = range(0.58, 0.86) * sizeMult;
+    const h = range(0.53, 0.76) * sizeMult;
     // Small random lean/roll per card (not just the shared yaw below) --
     // uniform flat cards all tilted identically within a band read as
     // repeated stickers; a bit of individual tilt variety breaks that up.
