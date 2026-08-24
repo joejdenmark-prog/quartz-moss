@@ -792,11 +792,23 @@ for (let i = 0; i < treePlacements.length; i++) {
   dummy.updateMatrix();
   trunkMesh.setMatrixAt(i, dummy.matrix);
 
-  // Uniform scale here (not scale*HEIGHT_MULT on Y) -- HEIGHT_MULT is
-  // already baked into CARD_SLOT_MATRICES itself (see the shear note
-  // above); this matrix only needs to carry the tree's own uniform size
-  // variance so composing it with a slot's rotation stays shear-free.
-  dummy.rotation.set(0, 0, 0);
+  // Cards get their OWN random yaw (cardYaw), independent of the trunk's
+  // rotY -- NOT identity as before. The shared CARD_SLOTS layout has real
+  // angular gaps within a band (verified: up to ~30-36 degrees in one
+  // stretch, an artifact of random per-slot angle jitter around evenly-
+  // spaced base angles), and since every tree previously used those exact
+  // same ABSOLUTE angles with no rotation, every tree's gap pointed the
+  // same world direction -- some trees happened to face that gap toward
+  // the fixed camera (looked sparse/gappy), others happened to face their
+  // densest cluster toward it (looked overly solid), a systematic
+  // per-tree inconsistency rather than random noise. Rotating each tree's
+  // whole card layout by its own random cardYaw decorrelates which
+  // direction each tree's weak/strong point faces, without changing any
+  // band's actual size or count. Still uniform scale + pure rotation here
+  // (no shear risk, per the earlier fix -- shear only comes from
+  // composing non-uniform scale with an independently-rotated child).
+  const cardYaw = range(0, Math.PI * 2);
+  dummy.rotation.set(0, cardYaw, 0);
   dummy.scale.set(scale, scale, scale);
   dummy.updateMatrix();
   cardTreeMatrices[i] = dummy.matrix.clone();
@@ -823,7 +835,12 @@ for (let i = 0; i < treePlacements.length; i++) {
     cardPlaceAArr[instIdx*4]   = x;
     cardPlaceAArr[instIdx*4+1] = z;
     cardPlaceAArr[instIdx*4+2] = scale;
-    cardPlaceAArr[instIdx*4+3] = slot.angle;
+    // cardYaw baked in directly (not a separate shader uniform/attribute)
+    // -- keeps this consistent with cardTreeMatrices[i] above, which now
+    // also carries cardYaw, so raycasting (matrix-based) and rendering
+    // (this value, read by the matrix-free vertex shader) agree on where
+    // each card actually is.
+    cardPlaceAArr[instIdx*4+3] = slot.angle + cardYaw;
     cardPlaceBArr[instIdx*4]   = slot.r;
     cardPlaceBArr[instIdx*4+1] = slot.y;
     cardPlaceBArr[instIdx*4+2] = slot.tiltX;
