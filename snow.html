@@ -1212,6 +1212,15 @@ lanternHandleMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
 const rngLantern = mulberry32(0x5f1000d);
 const rangeLantern = (a, b) => a + rngLantern() * (b - a);
 
+// Stage 3 glow: per-lantern position + flicker parameters, filled in the
+// same loop below (same source position, no separate pass needed). Kept as
+// plain arrays here and turned into a Points/ShaderMaterial object after
+// the loop -- same structure as the dust/snow particle systems above.
+const lanternGlowPos   = new Float32Array(treePlacements.length * 3);
+const lanternGlowPhase = new Float32Array(treePlacements.length);
+const lanternGlowFreq  = new Float32Array(treePlacements.length);
+const lanternGlowSize  = new Float32Array(treePlacements.length);
+
 const lanternDummy = new THREE.Object3D();
 for (let i = 0; i < treePlacements.length; i++) {
   const { x, z } = treePlacements[i];
@@ -1240,6 +1249,20 @@ for (let i = 0; i < treePlacements.length; i++) {
   lanternFrameMesh.setMatrixAt(i, lanternDummy.matrix);
   lanternGlassMesh.setMatrixAt(i, lanternDummy.matrix);
   lanternHandleMesh.setMatrixAt(i, lanternDummy.matrix);
+
+  // Glow sits at the glass body's own vertical center (0.095 in the
+  // lantern's local units -- matches lanternGlassGeo's translate below),
+  // scaled the same way the rest of this lantern instance is.
+  lanternGlowPos[i*3]   = lx;
+  lanternGlowPos[i*3+1] = ly + 0.095 * lanternScale;
+  lanternGlowPos[i*3+2] = lz;
+  // Own phase AND frequency per lantern (both from the same isolated
+  // rngLantern stream) so the flicker never reads as synchronized, even
+  // over long timescales where a shared-frequency-different-phase flicker
+  // would eventually drift back into looking aligned.
+  lanternGlowPhase[i] = rangeLantern(0, Math.PI * 2);
+  lanternGlowFreq[i]  = rangeLantern(0.8, 1.3);
+  lanternGlowSize[i]  = rangeLantern(0.8, 1.25);
 }
 lanternFrameMesh.count = treePlacements.length;
 lanternGlassMesh.count = treePlacements.length;
@@ -1248,6 +1271,80 @@ lanternFrameMesh.instanceMatrix.needsUpdate = true;
 lanternGlassMesh.instanceMatrix.needsUpdate = true;
 lanternHandleMesh.instanceMatrix.needsUpdate = true;
 scene.add(lanternFrameMesh, lanternGlassMesh, lanternHandleMesh);
+
+// Cheap cosmetic glow -- NOT real per-lantern point lights (360 dynamic
+// lights would be far too expensive for what's meant to be a subtle
+// decorative touch). Same THREE.Points + custom ShaderMaterial + additive
+// blending technique as the dust/snow systems above, with a single
+// uNightMix uniform tying visibility to the exact same day/night driver
+// (updateDayNight below) as everything else -- day is completely off
+// (uNightMix=0 multiplies the glow to nothing), night fades it in.
+const lanternGlowGeo = new THREE.BufferGeometry();
+lanternGlowGeo.setAttribute('position', new THREE.BufferAttribute(lanternGlowPos, 3));
+lanternGlowGeo.setAttribute('aPhase', new THREE.BufferAttribute(lanternGlowPhase, 1));
+lanternGlowGeo.setAttribute('aFreq', new THREE.BufferAttribute(lanternGlowFreq, 1));
+lanternGlowGeo.setAttribute('aSizeMult', new THREE.BufferAttribute(lanternGlowSize, 1));
+
+const lanternGlowMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uNightMix: { value: 0 },
+    uPixelRatio: { value: renderer.getPixelRatio() },
+    uColor: { value: new THREE.Vector3(1.0, 0.62, 0.22) }, // warm flame orange
+  },
+  transparent: true,
+  depthWrite: false,
+  // Each glow point sits at its own lantern's glass center, meaning that
+  // SAME lantern's glass/frame geometry sits between it and the camera at
+  // most viewing angles -- with normal depth testing this self-occludes
+  // completely (confirmed live: the glow was invisible at every angle
+  // tried until this was disabled). Trades away correct occlusion by
+  // OTHER, unrelated geometry the glow might rarely sit behind, which is
+  // the standard, accepted tradeoff for cheap glow/light sprites like this.
+  depthTest: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float aPhase;
+    attribute float aFreq;
+    attribute float aSizeMult;
+    uniform float uTime, uNightMix, uPixelRatio;
+    varying float vBrightness;
+    void main(){
+      // Two summed sine terms (slow "breathe" + faster secondary wobble),
+      // same layered-oscillator idiom as the dusting-shake wobble above --
+      // reads as a soft, organic flicker rather than a single clean pulse.
+      float flicker = 0.82 + 0.12 * sin(uTime * aFreq + aPhase)
+                           + 0.06 * sin(uTime * aFreq * 2.3 + aPhase * 1.7);
+      vBrightness = uNightMix * flicker;
+      vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * mvPosition;
+      float dist = -mvPosition.z;
+      // Falloff constant tuned much higher than the dust/snow particles'
+      // (which are meant to be small close-range specks) -- lanterns are
+      // scattered across the whole ~100-unit-deep forest and the glow
+      // needs to still read as a warm dot at realistic (20-100 unit)
+      // viewing distances, not just when standing right next to one.
+      gl_PointSize = clamp(550.0 * aSizeMult * uPixelRatio * flicker / max(dist, 4.0), 4.0, 70.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor;
+    varying float vBrightness;
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+      float d = length(uv) * 2.0;
+      float glow = smoothstep(1.0, 0.0, d); // soft radial falloff, brightest at center
+      if (glow < 0.01 || vBrightness < 0.001) discard;
+      gl_FragColor = vec4(uColor * glow * vBrightness, 1.0);
+    }
+  `,
+});
+const lanternGlow = new THREE.Points(lanternGlowGeo, lanternGlowMat);
+// Positions are a fixed, known set (unlike snow/dust, nothing here is
+// shader-displaced away from its buffered position), so the default
+// bounding-sphere culling is actually correct here -- frustumCulled stays
+// at its default (true), unlike snow/dust/cards above.
+scene.add(lanternGlow);
 
 // ── Falling snow ──────────────────────────────────────────────────────────────
 // Every particle's position is a closed-form function of uTime (straight
@@ -1788,7 +1885,16 @@ const DAY_HEMI_INTENSITY = 1.15;
 // smaller bump -- these are the values where even that worst-case facet
 // shows real, screenshot-confirmed groove detail, while the full default-
 // camera scene still reads as genuine, convincingly dark nighttime.
-const NIGHT_HEMI_INTENSITY = 0.75;
+// Modest further bump (0.75 -> 0.95) for Stage 3's lantern glow: the glow
+// sprites themselves don't actually illuminate anything (cheap cosmetic
+// sprites, not real lights), so per the brief this is the simplest way to
+// let tree/trunk detail near the lanterns still read at night rather than
+// leaving the forest uniformly pitch dark around them. Global rather than
+// spatially localized -- the brief explicitly allows this -- since a
+// per-lantern-area light boost would need real (expensive) point lights or
+// per-vertex shader work on the ground/trunk/canopy materials for a
+// cosmetic-only gain.
+const NIGHT_HEMI_INTENSITY = 0.95;
 const DAY_SUN_COLOR      = new THREE.Color(0xf3f8fb);
 const NIGHT_SUN_COLOR    = new THREE.Color(0xaac4e6); // same directional light doubles as pale moonlight at night
 const DAY_SUN_INTENSITY  = 0.35;
@@ -1888,6 +1994,8 @@ renderer.setAnimationLoop(() => {
   simTime += dt;
   snowMat.uniforms.uTime.value = simTime;
   dustMat.uniforms.uTime.value = simTime;
+  lanternGlowMat.uniforms.uTime.value = simTime;
+  lanternGlowMat.uniforms.uNightMix.value = nightMix;
   // cardMat's shader uniforms only exist once WebGL has actually compiled
   // the patched shader (onBeforeCompile runs on first use) -- guard for the
   // very first frame(s) before that's happened.
@@ -1906,7 +2014,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future work ───────────────────────────────────────────
-window.__snow = { THREE, scene, camera, renderer, ground, groundMat, trunkMesh, trunkMat, barkTex, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, treeCardOrigin, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, HEIGHT_MULT, cardPlaceAAttr, cardPlaceBAttr, cardSlotSizeAttr, cardShakeAngleAttr, treeRenderOrder, blockPosOfTree, DUST_COUNT, DUST_TIER_PARTICLES, DUST_TIER_SIZE_MULT, dustPosAttr, dustSizeAttr, dustStartAttr, hemiLight, sky, CANOPY_GREEN, CANOPY_SNOW, toggleDayNight, updateDayNight, NIGHT_TRANSITION_DURATION, get nightMix(){ return nightMix; }, get nightMixTarget(){ return nightMixTarget; }, lanternFrameMesh, lanternGlassMesh, lanternHandleMesh, lanternMetalMat, lanternGlassMat, get simTime(){ return simTime; } };
+window.__snow = { THREE, scene, camera, renderer, ground, groundMat, trunkMesh, trunkMat, barkTex, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, treeCardOrigin, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, HEIGHT_MULT, cardPlaceAAttr, cardPlaceBAttr, cardSlotSizeAttr, cardShakeAngleAttr, treeRenderOrder, blockPosOfTree, DUST_COUNT, DUST_TIER_PARTICLES, DUST_TIER_SIZE_MULT, dustPosAttr, dustSizeAttr, dustStartAttr, hemiLight, sky, CANOPY_GREEN, CANOPY_SNOW, toggleDayNight, updateDayNight, NIGHT_TRANSITION_DURATION, get nightMix(){ return nightMix; }, get nightMixTarget(){ return nightMixTarget; }, lanternFrameMesh, lanternGlassMesh, lanternHandleMesh, lanternMetalMat, lanternGlassMat, lanternGlow, lanternGlowMat, NIGHT_HEMI_INTENSITY, get simTime(){ return simTime; } };
 </script>
 </body>
 </html>
