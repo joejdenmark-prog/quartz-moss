@@ -1226,9 +1226,22 @@ for (let i = 0; i < treePlacements.length; i++) {
   const { x, z } = treePlacements[i];
   // Offset from the trunk center, not centered/floating on it -- far enough
   // to clear the trunk's own radius (max 0.32) with margin, close enough to
-  // still read as "resting at the base of this tree".
-  const dist = rangeLantern(0.38, 0.62);
-  const angle = rangeLantern(0, Math.PI * 2);
+  // still read as "resting at the base of this tree". Range raised (was
+  // 0.38-0.62) after a raycast audit found most lanterns hidden behind
+  // their own tree's low-hanging base-band canopy (that band's radius +
+  // card width commonly reaches past the old placement radius) -- pushing
+  // out helps clear that overhang without landing out in the open snow.
+  const dist = rangeLantern(0.55, 0.85);
+  // Biased toward the camera-facing side of the trunk rather than a full
+  // 0-2pi random angle -- the same raycast audit found ~1 in 5 lanterns
+  // hidden behind their own trunk simply because the random angle happened
+  // to land on the far side from this scene's camera (which, unlike most
+  // scenes, never moves -- so there IS a single "wrong side" here, not an
+  // arbitrary aesthetic bias). A +-65 degree spread around the true
+  // camera bearing keeps real per-tree variation (not glued to one exact
+  // angle) while making that specific occlusion rare instead of common.
+  const cameraBearing = Math.atan2(camera.position.z - z, camera.position.x - x);
+  const angle = cameraBearing + rangeLantern(-1.13, 1.13);
   const lx = x + Math.cos(angle) * dist;
   const lz = z + Math.sin(angle) * dist;
   // Range shifted up (was 0.85-1.2) for a modest overall size increase --
@@ -1345,6 +1358,51 @@ const lanternGlow = new THREE.Points(lanternGlowGeo, lanternGlowMat);
 // bounding-sphere culling is actually correct here -- frustumCulled stays
 // at its default (true), unlike snow/dust/cards above.
 scene.add(lanternGlow);
+
+// A small number of REAL point lights, for just the lanterns nearest this
+// scene's fixed camera -- the glow sprites above are purely additive/
+// cosmetic and never actually light up nearby trunk/canopy detail (a
+// billboard can't cast light), which is the specific gap this closes.
+// 360 real dynamic lights would be genuinely expensive; since the camera
+// never moves in this scene, "which lanterns are ever close enough to be
+// worth real illumination" is a fixed, one-time decision made here at load
+// time -- not a per-frame dynamic system -- so this costs nothing beyond
+// the flicker update below. Every material that responds to scene lights
+// normally (trunkMat, groundMat, and cardMat -- its onBeforeCompile patch
+// above only intercepts the diffuse-color chunk, not the separate lighting
+// chunks, so real lights still reach it) picks these up for free.
+const LANTERN_LIGHT_COUNT = 10;
+const LANTERN_LIGHT_COLOR = 0xffa848;
+const LANTERN_LIGHT_BASE_INTENSITY = 1.6;
+const LANTERN_LIGHT_DISTANCE = 3.2; // real falloff range -- keeps this localized to the lantern's own tree rather than brightening a wide area
+const LANTERN_LIGHT_DECAY = 2;
+
+const lanternLightCandidates = [];
+for (let i = 0; i < treePlacements.length; i++) {
+  const dx = lanternGlowPos[i*3] - camera.position.x;
+  const dz = lanternGlowPos[i*3+2] - camera.position.z;
+  lanternLightCandidates.push({ i, distSq: dx*dx + dz*dz });
+}
+lanternLightCandidates.sort((a, b) => a.distSq - b.distSq);
+
+const lanternLights = []; // { light, phase, freq } -- phase/freq reused from the same lantern's glow sprite, so the real light pulses in the same rhythm as its own glow, not a separate uncoordinated flicker
+for (let k = 0; k < LANTERN_LIGHT_COUNT && k < lanternLightCandidates.length; k++) {
+  const idx = lanternLightCandidates[k].i;
+  const light = new THREE.PointLight(LANTERN_LIGHT_COLOR, 0, LANTERN_LIGHT_DISTANCE, LANTERN_LIGHT_DECAY);
+  light.position.set(lanternGlowPos[idx*3], lanternGlowPos[idx*3+1], lanternGlowPos[idx*3+2]);
+  light.castShadow = false; // shadow maps are off scene-wide (renderer.shadowMap.enabled above) -- explicit here for clarity, not because it would otherwise turn that on
+  scene.add(light);
+  lanternLights.push({ light, phase: lanternGlowPhase[idx], freq: lanternGlowFreq[idx] });
+}
+// Same flicker formula as the glow shader, evaluated in plain JS for these
+// few real lights -- trivially cheap (10 sine pairs per frame) compared to
+// anything else already running per frame in this scene.
+function updateLanternLights(now){
+  for (const { light, phase, freq } of lanternLights) {
+    const flicker = 0.82 + 0.12 * Math.sin(now * freq + phase) + 0.06 * Math.sin(now * freq * 2.3 + phase * 1.7);
+    light.intensity = LANTERN_LIGHT_BASE_INTENSITY * nightMix * flicker;
+  }
+}
 
 // ── Falling snow ──────────────────────────────────────────────────────────────
 // Every particle's position is a closed-form function of uTime (straight
@@ -2003,6 +2061,7 @@ renderer.setAnimationLoop(() => {
   updateTapFades(simTime);
   updateShakes(simTime);
   updateDayNight(simTime);
+  updateLanternLights(simTime);
 
   renderer.render(scene, camera);
 
@@ -2014,7 +2073,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ── Console handle for future work ───────────────────────────────────────────
-window.__snow = { THREE, scene, camera, renderer, ground, groundMat, trunkMesh, trunkMat, barkTex, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, treeCardOrigin, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, HEIGHT_MULT, cardPlaceAAttr, cardPlaceBAttr, cardSlotSizeAttr, cardShakeAngleAttr, treeRenderOrder, blockPosOfTree, DUST_COUNT, DUST_TIER_PARTICLES, DUST_TIER_SIZE_MULT, dustPosAttr, dustSizeAttr, dustStartAttr, hemiLight, sky, CANOPY_GREEN, CANOPY_SNOW, toggleDayNight, updateDayNight, NIGHT_TRANSITION_DURATION, get nightMix(){ return nightMix; }, get nightMixTarget(){ return nightMixTarget; }, lanternFrameMesh, lanternGlassMesh, lanternHandleMesh, lanternMetalMat, lanternGlassMat, lanternGlow, lanternGlowMat, NIGHT_HEMI_INTENSITY, get simTime(){ return simTime; } };
+window.__snow = { THREE, scene, camera, renderer, ground, groundMat, trunkMesh, trunkMat, barkTex, cardMesh, treePlacements, CARDS_PER_TREE, CARD_TOTAL, snow, snowMat, SNOW_COUNT, cardMat, resetTimeAttr, cardResetTimeAttr, SNOW_BUILDUP_MAX, SNOW_BUILDUP_SPAN, dust, dustMat, handleTap, spawnDustBurst, treeCardOrigin, applyTap, coverageNow, tapState, TAP_COOLDOWN, TAP_FADE_DURATION, activeFades, updateTapFades, activeShakes, triggerShake, updateShakes, SHAKE_DURATION, HEIGHT_MULT, cardPlaceAAttr, cardPlaceBAttr, cardSlotSizeAttr, cardShakeAngleAttr, treeRenderOrder, blockPosOfTree, DUST_COUNT, DUST_TIER_PARTICLES, DUST_TIER_SIZE_MULT, dustPosAttr, dustSizeAttr, dustStartAttr, hemiLight, sky, CANOPY_GREEN, CANOPY_SNOW, toggleDayNight, updateDayNight, NIGHT_TRANSITION_DURATION, get nightMix(){ return nightMix; }, get nightMixTarget(){ return nightMixTarget; }, lanternFrameMesh, lanternGlassMesh, lanternHandleMesh, lanternMetalMat, lanternGlassMat, lanternGlow, lanternGlowMat, lanternLights, updateLanternLights, NIGHT_HEMI_INTENSITY, get simTime(){ return simTime; } };
 </script>
 </body>
 </html>
