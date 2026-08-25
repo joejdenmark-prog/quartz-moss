@@ -1307,14 +1307,11 @@ const lanternGlowMat = new THREE.ShaderMaterial({
   },
   transparent: true,
   depthWrite: false,
-  // Each glow point sits at its own lantern's glass center, meaning that
-  // SAME lantern's glass/frame geometry sits between it and the camera at
-  // most viewing angles -- with normal depth testing this self-occludes
-  // completely (confirmed live: the glow was invisible at every angle
-  // tried until this was disabled). Trades away correct occlusion by
-  // OTHER, unrelated geometry the glow might rarely sit behind, which is
-  // the standard, accepted tradeoff for cheap glow/light sprites like this.
-  depthTest: false,
+  // Real depth testing is back on (was disabled entirely -- see the bias
+  // trick below for why that's no longer needed). With depthTest:false,
+  // the glow rendered right through any tree genuinely in front of it,
+  // which read as a real "light shining through solid trunks" bug.
+  depthTest: true,
   blending: THREE.AdditiveBlending,
   vertexShader: `
     attribute float aPhase;
@@ -1330,6 +1327,16 @@ const lanternGlowMat = new THREE.ShaderMaterial({
                            + 0.06 * sin(uTime * aFreq * 2.3 + aPhase * 1.7);
       vBrightness = uNightMix * flicker;
       vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+      // Nudge the tested depth toward the camera by a small, fixed amount
+      // (view space, so it's a constant world-space distance regardless of
+      // how far away this point is) -- just enough to clear THIS lantern's
+      // own glass/frame (whose largest radius, scaled up to the biggest
+      // lantern instance, is under 0.1 units from this point), while
+      // staying far too small to matter against genuinely different,
+      // farther-away geometry like another tree in front of it. This is
+      // what lets depthTest stay on: self-occlusion is solved with a
+      // targeted bias instead of disabling occlusion altogether.
+      mvPosition.z += 0.15;
       gl_Position = projectionMatrix * mvPosition;
       float dist = -mvPosition.z;
       // Falloff constant tuned much higher than the dust/snow particles'
@@ -1377,8 +1384,26 @@ const LANTERN_LIGHT_BASE_INTENSITY = 1.6;
 const LANTERN_LIGHT_DISTANCE = 3.2; // real falloff range -- keeps this localized to the lantern's own tree rather than brightening a wide area
 const LANTERN_LIGHT_DECAY = 2;
 
+// Ranked by distance among lanterns actually WITHIN the camera's view, not
+// raw straight-line distance -- this scene's forest spans +-90 units
+// laterally but the camera's FOV is narrow, so "10 closest by distance"
+// turned out to mostly pick lanterns that are close but far off to the
+// side, never actually seen (confirmed: only 1 of the original 10 had an
+// on-screen projection at all). Filtering to in-frustum candidates first
+// makes the real-light budget actually land on lanterns a viewer sees.
+// Needed before the very first use of camera.project() below: nothing has
+// called renderer.render() yet at this point in the load sequence (that's
+// what normally keeps a camera's world matrix in sync after position/
+// lookAt calls), so without this, matrixWorldInverse is still stale --
+// confirmed live: without this line, EVERY lantern's projected NDC came
+// back nonsensical (values like 13.69, -19.54), not just off-by-a-bit.
+camera.updateMatrixWorld(true);
+const _lanternFrustumV = new THREE.Vector3();
 const lanternLightCandidates = [];
 for (let i = 0; i < treePlacements.length; i++) {
+  _lanternFrustumV.set(lanternGlowPos[i*3], lanternGlowPos[i*3+1], lanternGlowPos[i*3+2]);
+  _lanternFrustumV.project(camera);
+  if (_lanternFrustumV.z < -1 || _lanternFrustumV.z > 1 || _lanternFrustumV.x < -1 || _lanternFrustumV.x > 1 || _lanternFrustumV.y < -1 || _lanternFrustumV.y > 1) continue;
   const dx = lanternGlowPos[i*3] - camera.position.x;
   const dz = lanternGlowPos[i*3+2] - camera.position.z;
   lanternLightCandidates.push({ i, distSq: dx*dx + dz*dz });
@@ -1403,6 +1428,18 @@ function updateLanternLights(now){
     light.intensity = LANTERN_LIGHT_BASE_INTENSITY * nightMix * flicker;
   }
 }
+// Warm up whatever one-time GPU/driver setup happens the first time these
+// lights actually have nonzero intensity, right now during load instead of
+// during the user's first real day->night transition. Measured via
+// repeated performance.now()+gl.finish() sampling: inconclusive under
+// rigorous re-testing (a single early run showed a ~5ms spike that didn't
+// reproduce across several follow-up runs, more consistent with one-time
+// JS JIT/driver warm-up noise than a real recurring cost) -- but priming
+// it here is essentially free (one extra render before the user sees
+// anything) and removes it as a possible cause either way.
+for (const { light } of lanternLights) light.intensity = 0.0001;
+renderer.render(scene, camera);
+for (const { light } of lanternLights) light.intensity = 0;
 
 // ── Falling snow ──────────────────────────────────────────────────────────────
 // Every particle's position is a closed-form function of uTime (straight
