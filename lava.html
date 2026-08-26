@@ -2269,7 +2269,7 @@ function startAmbientAudio(){
 // slightly before the visual drain completes) with a baked-in ~600ms
 // fade-in and ~2.5s fade-out. Playback is still a single untouched
 // one-shot starting the instant the fill begins — no rate/loop tricks.
-const CRACK_FILL_VOLUME = 0.12; // 0-1, independent of AMBIENT_VOLUME/POP_VOLUME — adjust freely
+const CRACK_FILL_VOLUME = 0.04; // 0-1, independent of AMBIENT_VOLUME/POP_VOLUME — adjust freely. Lowered further (was 0.12) to sit as a barely-perceptible background texture rather than an audible effect on its own.
 let crackFillBuffer = null, crackFillGain = null;
 
 function loadCrackFillSound(){
