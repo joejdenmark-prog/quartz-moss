@@ -1462,16 +1462,16 @@ for (const { light } of lanternLights) light.intensity = 0;
 // search of any kind, unlike rain.html's droplets (which need the
 // occupancy-gate machinery specifically because they sample/bend the
 // background; these don't).
-// Reversible test: 3000 -> 2000 (-33%), first attempt at reducing sustained
-// GPU/CPU cost to see if it delays/reduces the iOS Safari thermal-
-// throttling stutter reported in both day and night (confirmed unrelated
-// to any specific feature -- happens in plain daytime too, stays flat once
-// it starts rather than progressively worsening, and no code-side leak or
-// per-frame cost growth was found after 140+ seconds of instrumented
-// testing). This is the single density dial mentioned below -- revert to
-// 3000 in one edit if this doesn't help, no other code depends on the
-// exact value.
-const SNOW_COUNT = 2000; // <- the single density dial: light flurries to blizzard-thick, just change this
+// Reversible test, round 2: 2000 -> 1400 (-30%, same relative size as the
+// first cut). Round 1 (3000->2000) measurably delayed the iOS Safari
+// thermal-throttle onset (5-10s -> ~20s); a separate mobile-pixel-ratio cut
+// (1.5->1.25) reduced the throttle's SEVERITY once it hit but didn't move
+// onset at all -- so this round specifically targets onset again via the
+// lever that's actually shown an effect on it, as a third data point to
+// see whether the relationship keeps paying off or is flattening out.
+// Revert to 2000 (or 3000) in one edit if this doesn't help further; no
+// other code depends on the exact value.
+const SNOW_COUNT = 1400; // <- the single density dial: light flurries to blizzard-thick, just change this
 // Sized to the camera's actual view cone, not just copied from the tree
 // field's width -- measured directly (via the real projection matrix)
 // that with the old values only ~13% of particles were ever inside the
