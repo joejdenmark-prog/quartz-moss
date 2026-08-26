@@ -98,7 +98,15 @@ const canvas = document.getElementById('canvas');
 const isMobile = window.matchMedia('(pointer: coarse)').matches;
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(isMobile ? Math.min(window.devicePixelRatio, 1.5) : Math.min(window.devicePixelRatio, 2));
+// Reversible test: mobile cap 1.5 -> 1.25 (desktop cap untouched -- the
+// reported iOS Safari thermal-throttle stutter is mobile-specific, and
+// this scene isn't showing the issue on desktop). Pixel ratio scales
+// fragment-shader cost across EVERY material in the scene at once (~(1.25/
+// 1.5)^2, roughly a 30% cut), unlike SNOW_COUNT which only affects the
+// snow particles -- tried second, after cutting SNOW_COUNT 3000->2000
+// alone measurably delayed (didn't eliminate) the throttle onset. Revert
+// to 1.5 in one edit if this doesn't help further.
+renderer.setPixelRatio(isMobile ? Math.min(window.devicePixelRatio, 1.25) : Math.min(window.devicePixelRatio, 2));
 canvas.style.width = W + 'px';
 canvas.style.height = H + 'px';
 renderer.setSize(W, H);
