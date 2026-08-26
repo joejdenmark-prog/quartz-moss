@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#12141a">
+<title>Scene Hub</title>
+<style>
+  *,*::before,*::after{ margin:0; padding:0; box-sizing:border-box; }
+  html,body{
+    width:100%; height:100%; overflow:hidden;
+    background:#12141a;
+    font-family:system-ui,-apple-system,sans-serif;
+    -webkit-tap-highlight-color:transparent;
+  }
+
+  /* ── Grid (picker) view ─────────────────────────────────────────────── */
+  #grid-view{
+    position:fixed; inset:0;
+    display:flex; flex-direction:column; align-items:center;
+    padding:14vh 24px 24px;
+    overflow-y:auto;
+  }
+  #grid-view h1{
+    color:#e8ecf1; font-size:22px; font-weight:600;
+    letter-spacing:0.02em; margin-bottom:6px; text-align:center;
+  }
+  #grid-view p.sub{
+    color:#8a92a3; font-size:14px; margin-bottom:36px; text-align:center;
+  }
+  #cards{
+    display:flex; flex-direction:column; gap:16px;
+    width:100%; max-width:360px;
+  }
+  .card{
+    display:flex; align-items:center; gap:16px;
+    padding:18px 20px;
+    border-radius:14px;
+    border:1px solid rgba(255,255,255,0.08);
+    background:linear-gradient(135deg, var(--c1), var(--c2));
+    cursor:pointer;
+    -webkit-tap-highlight-color:transparent; touch-action:manipulation;
+    transition:transform .12s ease, filter .12s ease;
+  }
+  .card:hover{ filter:brightness(1.08); }
+  .card:active{ transform:scale(.97); }
+  .card .icon{ font-size:30px; line-height:1; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.4)); }
+  .card .label{ display:flex; flex-direction:column; gap:2px; }
+  .card .name{ color:#f2f4f7; font-size:16px; font-weight:600; }
+  .card .desc{ color:rgba(242,244,247,0.72); font-size:12.5px; }
+
+  #card-snow  { --c1:#2b3d47; --c2:#1a2830; }
+  #card-lava  { --c1:#3d1f14; --c2:#24100a; }
+  #card-quartz{ --c1:#1c3324; --c2:#101f16; }
+
+  /* ── Viewer (iframe) view ───────────────────────────────────────────── */
+  #viewer-view{
+    position:fixed; inset:0;
+    display:none;
+    background:#000;
+  }
+  #viewer-view.active{ display:block; }
+  #scene-frame{
+    position:absolute; inset:0;
+    width:100%; height:100%;
+    border:none; display:block;
+  }
+  #hub-back-btn{
+    position:fixed; top:14px; right:14px; z-index:100;
+    display:none; align-items:center; gap:6px;
+    padding:8px 14px 8px 12px;
+    border-radius:999px;
+    border:1px solid rgba(255,255,255,0.25);
+    background:rgba(18,20,26,0.62);
+    color:rgba(235,238,244,0.92);
+    font-size:13px; font-weight:500;
+    cursor:pointer;
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    transition:opacity .2s ease, transform .12s ease;
+    opacity:.8; user-select:none;
+    -webkit-tap-highlight-color:transparent; touch-action:manipulation;
+  }
+  #hub-back-btn:hover{ opacity:1; }
+  #hub-back-btn:active{ transform:scale(.94); opacity:1; }
+  #hub-back-btn.visible{ display:flex; }
+
+  #grid-view.hidden{ display:none; }
+</style>
+</head>
+<body>
+
+<div id="grid-view">
+  <h1>Relaxation Scenes</h1>
+  <p class="sub">Pick a scene to preview</p>
+  <div id="cards">
+    <div class="card" id="card-snow" data-url="/snow.html">
+      <div class="icon">❄️</div>
+      <div class="label">
+        <div class="name">Snowy Forest</div>
+        <div class="desc">Falling snow, day/night lanterns</div>
+      </div>
+    </div>
+    <div class="card" id="card-lava" data-url="/lava.html">
+      <div class="icon">🔥</div>
+      <div class="label">
+        <div class="name">Lava River</div>
+        <div class="desc">Molten flow, heat haze, embers</div>
+      </div>
+    </div>
+    <div class="card" id="card-quartz" data-url="/index.html">
+      <div class="icon">🌿</div>
+      <div class="label">
+        <div class="name">Quartz Moss Wall</div>
+        <div class="desc">Moss-grown crystal formation</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="viewer-view">
+  <iframe id="scene-frame" title="Scene preview" allow="autoplay"></iframe>
+</div>
+<button id="hub-back-btn" title="Back to hub">← Hub</button>
+
+<script>
+  const gridView = document.getElementById('grid-view');
+  const viewerView = document.getElementById('viewer-view');
+  const sceneFrame = document.getElementById('scene-frame');
+  const backBtn = document.getElementById('hub-back-btn');
+
+  function openScene(url) {
+    sceneFrame.src = url;
+    gridView.classList.add('hidden');
+    viewerView.classList.add('active');
+    backBtn.classList.add('visible');
+  }
+
+  function backToHub() {
+    viewerView.classList.remove('active');
+    gridView.classList.remove('hidden');
+    backBtn.classList.remove('visible');
+    sceneFrame.src = 'about:blank'; // stop the scene's rendering/audio while hidden
+  }
+
+  document.querySelectorAll('.card').forEach(card => {
+    card.addEventListener('click', () => openScene(card.dataset.url));
+  });
+  backBtn.addEventListener('click', backToHub);
+</script>
+</body>
+</html>
