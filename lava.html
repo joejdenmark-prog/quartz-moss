@@ -38,12 +38,34 @@
   }
   #reset-btn:hover  { opacity:1; }
   #reset-btn:active { transform:scale(.9); opacity:1; }
+  /* Sits above everything else on the page (vignette z-index:5, reset-btn
+     z-index:100) so it fully blocks interaction with the scene underneath
+     -- the scene itself keeps rendering normally behind it, nothing is
+     paused. Fades out on tap rather than snapping away, then goes
+     pointer-events:none so it can never block input again afterward. */
+  #start-overlay{
+    position:fixed; inset:0; z-index:1000;
+    display:flex; align-items:center; justify-content:center;
+    background:rgba(6,2,1,0.86);
+    cursor:pointer;
+    transition:opacity .6s ease;
+    touch-action:manipulation; -webkit-tap-highlight-color:transparent;
+  }
+  #start-overlay.hidden{ opacity:0; pointer-events:none; }
+  #start-overlay span{
+    color:rgba(255,170,120,0.88);
+    font-size:15px; letter-spacing:0.09em; text-transform:uppercase;
+    font-weight:500;
+    animation:start-pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes start-pulse{ 0%,100%{ opacity:0.55; } 50%{ opacity:1; } }
 </style>
 </head>
 <body>
 <canvas id="canvas"></canvas>
 <div id="vignette"></div>
 <button id="reset-btn" title="Reset">↺</button>
+<div id="start-overlay"><span>Tap to Begin</span></div>
 
 <script type="importmap">
 { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
@@ -2386,6 +2408,17 @@ window.addEventListener('pointerdown', () => {
   if (!audioStarted) startAmbientAudio();
   else if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
 }, { once: true, passive: true });
+
+// ── Start screen ──────────────────────────────────────────────────────────────
+// Fully covers the page until dismissed, so the very first pointerdown
+// anywhere can only land on this overlay -- which is exactly the tap the
+// listener above is already waiting for (pointerdown bubbles from this
+// element up to window), so audio unlocks on this same tap with no changes
+// to the audio code itself. This handler's only job is the overlay's own
+// fade-out; it doesn't touch audio at all.
+document.getElementById('start-overlay').addEventListener('pointerdown', function dismissStartOverlay(){
+  this.classList.add('hidden');
+}, { once: true });
 
 // ── Initial ambient bubbles ───────────────────────────────────────────────────
 for (let i = 0; i < 4; i++) trySpawnBubble();
